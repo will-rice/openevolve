@@ -10,26 +10,13 @@ import os
 import sys
 import tempfile
 import unittest
-from dataclasses import asdict
 from pathlib import Path
-from unittest.mock import MagicMock
 
-from openevolve import process_parallel as process_parallel_module
+from openevolve import OpenEvolve
 from openevolve.config import Config, LLMModelConfig
-from openevolve.database import Program, ProgramDatabase
 from openevolve.llm.codex_app_server import CodexAppServerLLM
-from openevolve.process_parallel import ProcessParallelController
 
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
-# Worker globals _worker_init sets; restored after the test that sets them.
-WORKER_GLOBALS = (
-    "_worker_config",
-    "_worker_evaluation_file",
-    "_worker_evaluator",
-    "_worker_llm_ensemble",
-    "_worker_prompt_sampler",
-)
-MISSING = object()
 
 
 def model_config(log: Path, sleep: float = 0, **changes) -> LLMModelConfig:
@@ -40,7 +27,7 @@ def model_config(log: Path, sleep: float = 0, **changes) -> LLMModelConfig:
         "timeout": 30,
         "retries": 0,
         "retry_delay": 0,
-        "codex_command": [sys.executable, str(FAKE), str(log), str(sleep)],
+        "codex_command": [sys.executable, str(FAKE), str(log), str(sleep), "no change"],
     }
     return LLMModelConfig(**{**values, **changes})
 
@@ -122,62 +109,57 @@ class TestSandboxAndWorkspace(unittest.TestCase):
             CodexAppServerLLM(model_config(self.log, sandbox_mode="read_only"))
 
 
-class TestWorkerWorkspace(unittest.TestCase):
-    """A worker process builds its model from the shipped config and passes the parent."""
+# The program the run evolves, and the codex reply that edits it: a SEARCH/REPLACE
+# diff, as OpenEvolve's default diff-based evolution asks for.
+INITIAL_PROGRAM = "def f():\n    return 0\n"
+DIFF_REPLY = "<<<<<<< SEARCH\n    return 0\n=======\n    return 1\n>>>>>>> REPLACE\n"
+EVALUATOR = "def evaluate(program_path):\n    return {'combined_score': 0.5}\n"
+
+
+class TestRunWorkspace(unittest.TestCase):
+    """A real OpenEvolve run: its worker process gets the codex options and the parent."""
 
     def setUp(self):
-        saved = {name: getattr(process_parallel_module, name, MISSING) for name in WORKER_GLOBALS}
-
-        def restore():
-            for name, value in saved.items():
-                if value is MISSING:
-                    if hasattr(process_parallel_module, name):
-                        delattr(process_parallel_module, name)
-                else:
-                    setattr(process_parallel_module, name, value)
-
-        self.addCleanup(restore)
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.tmp = Path(directory.name)
 
     def test_the_parent_program_reaches_codex_in_a_worker(self):
-        """The codex options survive the worker's config round trip (asdict, then
-        LLMModelConfig(**m)), and the call's workspace holds the parent program."""
+        """The codex options survive the config's trip to a worker process (asdict,
+        then LLMModelConfig(**m)), and the call's workspace holds the parent."""
         log, root = self.tmp / "turns.jsonl", self.tmp / "workspaces"
         root.mkdir()
+        (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
+        (self.tmp / "evaluator.py").write_text(EVALUATOR)
         config = Config()
-        model = model_config(log, sandbox_mode="workspace-write", workspace_root=str(root))
-        config.llm.models = [model]
-        config.llm.evaluator_models = [model]
-        self.assertEqual(LLMModelConfig(**asdict(model)), model)
-        controller = ProcessParallelController(
-            config, "evaluator.py", ProgramDatabase(config.database)
+        config.evaluator.parallel_evaluations = 1
+        config.database.num_islands = 1
+        config.database.in_memory = True
+        command = [sys.executable, str(FAKE), str(log), "0", DIFF_REPLY]
+        config.llm.models = [
+            model_config(
+                log,
+                codex_command=command,
+                sandbox_mode="workspace-write",
+                workspace_root=str(root),
+            )
+        ]
+        config.llm.evaluator_models = config.llm.models
+        run = OpenEvolve(
+            initial_program_path=str(self.tmp / "initial_program.py"),
+            evaluation_file=str(self.tmp / "evaluator.py"),
+            config=config,
+            output_dir=str(self.tmp / "out"),
         )
-        config_dict = controller._serialize_config(config)
-        parent = Program(id="parent", code="x = 1\n", metrics={}, metadata={"island": 0})
-        snapshot = {
-            "programs": {"parent": parent.to_dict()},
-            "artifacts": {},
-            "islands": [["parent"]],
-            "current_island": 0,
-            "sampling_island": 0,
-            "feature_dimensions": [],
-        }
 
-        process_parallel_module._worker_init(config_dict, "evaluator.py", None)
-        process_parallel_module._worker_prompt_sampler = MagicMock()
-        process_parallel_module._worker_prompt_sampler.build_prompt.return_value = {
-            "system": "sys",
-            "user": "usr",
-        }
-        process_parallel_module._worker_evaluator = MagicMock()
-        process_parallel_module._run_iteration_worker(1, snapshot, "parent", [])
+        best = asyncio.run(run.run(iterations=1))
 
         [turn] = turns(log)
         self.assertEqual(turn["sandbox"], "workspace-write")
-        self.assertEqual(turn["files"], {"program.py": "x = 1\n"})
+        self.assertEqual(turn["files"], {"program.py": INITIAL_PROGRAM})
+        self.assertNotEqual(turn["process_cwd"], os.getcwd())
         self.assertEqual(list(root.iterdir()), [])
+        self.assertIsNotNone(best)
 
 
 if __name__ == "__main__":

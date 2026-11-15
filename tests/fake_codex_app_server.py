@@ -1,12 +1,12 @@
 """A fake `codex app-server` process for tests: standard library only.
 
-Started as `python fake_codex_app_server.py <log> <sleep> app-server` through the
+Started as `python fake_codex_app_server.py <log> <sleep> <reply> app-server` through the
 provider's `codex_command`. It answers the requests the provider sends with the
 shapes a real app-server returns (initialize, account/read with a ChatGPT login,
 thread/start, turn/start, then item/completed and turn/completed notifications)
 and appends one JSON line per turn to <log>: its process cwd, the thread's cwd and
 sandbox, and the files of the thread's cwd, if it has one, with their text. It sleeps <sleep> seconds
-before answering a turn.
+before answering a turn, and answers it with <reply>.
 """
 
 import json
@@ -16,6 +16,7 @@ import time
 
 log_path = sys.argv[1]
 sleep = float(sys.argv[2])
+reply = sys.argv[3]
 thread = {}
 
 
@@ -48,7 +49,7 @@ for line in sys.stdin:
         with open(log_path, "a") as log:
             log.write(json.dumps(record) + "\n")
         send({"id": request["id"], "result": {}})
-        item = {"id": "item-1", "type": "agentMessage", "text": "no change"}
+        item = {"id": "item-1", "type": "agentMessage", "text": reply}
         send({"method": "item/completed", "params": {"item": item}})
         turn = {"id": "turn-1", "status": "completed"}
         send({"method": "turn/completed", "params": {"turn": turn}})
