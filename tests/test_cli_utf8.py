@@ -38,7 +38,7 @@ else:
     command = [sys.executable, '-c', 'import sys; sys.stdout.buffer.write(' + repr(wire) + ')']
     model = CodexAppServerLLM()
     with patch.object(model, '_build_command', return_value=command):
-        session = model._start_session()
+        session = model._start_session(None)
     try:
         message = session.next_message(time.monotonic() + 5)
         assert message['method'] == 'example'

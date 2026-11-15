@@ -316,6 +316,9 @@ def _run_iteration(
                 _worker_llm_ensemble.generate_with_context(
                     system_message=prompt["system"],
                     messages=[{"role": "user", "content": prompt["user"]}],
+                    # The program being evolved, as a file of a backend's workspace
+                    # (codex_app_server's workspace_root); other backends ignore it.
+                    workspace_files={f"program{_worker_config.file_suffix}": parent.code},
                 )
             )
             token_usage = getattr(_worker_llm_ensemble, "last_usage", None)

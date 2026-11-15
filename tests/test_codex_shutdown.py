@@ -34,7 +34,7 @@ class TestCodexShutdown(unittest.TestCase):
                 if request_timeout:
                     model = CodexAppServerLLM()
                     with patch.object(model, "_start_session", return_value=session):
-                        model._run_app_server("test", timeout=0.05)
+                        model._run_app_server("test", timeout=0.05, files={})
                 else:
                     session.close()
             except BaseException as error:

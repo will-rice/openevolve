@@ -124,7 +124,22 @@ llm:
       weight: 0.2
 ```
 
-Each call speaks newline-delimited JSON-RPC to a short-lived `codex app-server` process over stdio (unsupported on Windows). Threads run non-interactive: tool approvals are `never` and the sandbox is read-only, so responses are generated without mutating your workspace.
+Each call speaks newline-delimited JSON-RPC to a short-lived `codex app-server` process over stdio (unsupported on Windows). Threads run non-interactive: tool approvals are `never` and the sandbox is read-only by default, so responses are generated without mutating your workspace.
+
+Per model, three options change that:
+
+- `sandbox_mode`: the thread's Codex sandbox, `read-only` (default), `workspace-write` or `danger-full-access`. With `workspace-write` Codex can write its working directory (and, by Codex's defaults, `/tmp` and `$TMPDIR`), so it can run and test its draft before it answers; the network stays off.
+- `workspace_root`: each call runs Codex in a fresh directory made under it, holding the program being evolved as `program<file_suffix>`, and removes it when the call ends. A sandbox that can write requires it, so calls that run at once never share a working directory.
+- `codex_command`: the argv that starts Codex, before `app-server` (default `["codex"]`): a launcher that caps its resources, or a `codex` outside `PATH`.
+
+```yaml
+llm:
+  provider: "codex_app_server"
+  models:
+    - name: "gpt-5.3-codex"
+      sandbox_mode: "workspace-write"
+      workspace_root: "/scratch/openevolve-codex"
+```
 
 ## Cost Estimation
 

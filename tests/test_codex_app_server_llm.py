@@ -190,8 +190,9 @@ def _make_cfg(**overrides):
         "retries": 0,
         "retry_delay": 0,
         "reasoning_effort": None,
-        "cwd": None,
-        "codex_bin": None,
+        "codex_command": None,
+        "sandbox_mode": None,
+        "workspace_root": None,
         "init_client": None,
         "provider": None,
     }
@@ -332,9 +333,10 @@ class TestGenerationProtocol(unittest.TestCase):
         params = next(p for m, p in fake.requests if m == "turn/start")
         self.assertNotIn("effort", params)
 
-    def test_custom_codex_bin_is_used(self):
-        _, _, captured = run_generate(cfg_overrides={"codex_bin": "/opt/codex/bin/codex"})
-        self.assertEqual(captured["cmd"], ["/opt/codex/bin/codex", "app-server"])
+    def test_custom_codex_command_is_used(self):
+        command = ["/usr/bin/env", "/opt/codex/bin/codex"]
+        _, _, captured = run_generate(cfg_overrides={"codex_command": command})
+        self.assertEqual(captured["cmd"], [*command, "app-server"])
 
     def test_interrupted_turn_raises(self):
         outcome, _, _ = run_generate(scenario="interrupted")
@@ -380,9 +382,7 @@ class TestGenerationProtocol(unittest.TestCase):
             worker = threading.Thread(target=_execute, daemon=True)
             worker.start()
             worker.join(timeout=15)
-        self.assertFalse(
-            worker.is_alive(), "generate() wedged on an interleaved notification"
-        )
+        self.assertFalse(worker.is_alive(), "generate() wedged on an interleaved notification")
         self.assertIsNone(outcome.get("error"))
         self.assertEqual(outcome.get("result"), "hello world")
 

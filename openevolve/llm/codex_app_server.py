@@ -30,11 +30,17 @@ Or inject programmatically:
 Notes:
 - `temperature`, `top_p` and `max_tokens` have no equivalent app-server option
   in this first pass and are therefore ignored.
-- Each generation call spawns a fresh `codex app-server` process, speaks
-  newline-delimited JSON-RPC over its stdio (the protocol's default transport),
-  and shuts it down again. Threads are non-interactive: tool approvals are set
-  to "never" and the workspace sandbox to read-only, so the model can answer
-  but not mutate the tree while generating a response.
+- Each generation call spawns a fresh `codex app-server` process (from
+  `codex_command`, ["codex"] by default), speaks newline-delimited JSON-RPC over
+  its stdio (the protocol's default transport), and shuts it down again. Threads
+  are non-interactive: tool approvals are set to "never". The sandbox is
+  `sandbox_mode`, read-only by default, so the model can answer but not mutate
+  the tree while generating a response.
+- With `workspace_root`, each call runs Codex in a fresh directory under it
+  holding the call's `workspace_files` (the evolution loop passes the parent
+  program, `program<file_suffix>`), removed when the call ends. A sandbox that
+  can write ("workspace-write", "danger-full-access") requires it, so calls that
+  run at once never write one cwd.
 - The stdio transport is unsupported on Windows; the backend expects a POSIX
   shell there.
 """
@@ -42,8 +48,10 @@ Notes:
 import asyncio
 import json
 import logging
+import os
 import queue
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -55,6 +63,9 @@ logger = logging.getLogger(__name__)
 
 # Union of reasoning efforts documented for the GPT-5.x / Codex model families.
 VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+
+# ThreadStartParams.sandbox: the app-server's SandboxMode string enum.
+VALID_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
@@ -220,8 +231,19 @@ class CodexAppServerLLM(LLMInterface):
         self.retries = _cfg_value(model_cfg, "retries", 3)
         self.retry_delay = _cfg_value(model_cfg, "retry_delay", 5)
         self.reasoning_effort = getattr(model_cfg, "reasoning_effort", None)
-        self.cwd = getattr(model_cfg, "cwd", None)
-        self.codex_bin = _cfg_value(model_cfg, "codex_bin", "codex")
+        self.codex_command = list(_cfg_value(model_cfg, "codex_command", ["codex"]))
+        self.sandbox_mode = _cfg_value(model_cfg, "sandbox_mode", "read-only")
+        self.workspace_root = getattr(model_cfg, "workspace_root", None)
+        if self.sandbox_mode not in VALID_SANDBOX_MODES:
+            raise ValueError(
+                f"Invalid sandbox_mode: {self.sandbox_mode}. "
+                f"Expected one of {', '.join(VALID_SANDBOX_MODES)}"
+            )
+        if self.sandbox_mode != "read-only" and self.workspace_root is None:
+            raise ValueError(
+                f"sandbox_mode {self.sandbox_mode} needs a workspace_root, so that "
+                "concurrent calls never write one working directory"
+            )
         if (
             self.reasoning_effort is not None
             and self.reasoning_effort not in VALID_REASONING_EFFORTS
@@ -251,12 +273,15 @@ class CodexAppServerLLM(LLMInterface):
         timeout = kwargs.get("timeout", self.timeout)
         retries = kwargs.get("retries", self.retries)
         retry_delay = kwargs.get("retry_delay", self.retry_delay)
+        files = kwargs.get("workspace_files", {})
 
         loop = asyncio.get_event_loop()
         for attempt in range(retries + 1):
             try:
                 return await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: self._run_app_server(prompt, timeout)),
+                    loop.run_in_executor(
+                        None, lambda: self._run_app_server(prompt, timeout, files)
+                    ),
                     timeout=timeout + 30,
                 )
             except FileNotFoundError:
@@ -288,11 +313,22 @@ class CodexAppServerLLM(LLMInterface):
                     raise
 
     def _build_command(self) -> List[str]:
-        return [self.codex_bin, "app-server"]
+        return [*self.codex_command, "app-server"]
 
-    def _run_app_server(self, prompt: str, timeout: int) -> str:
+    def _run_app_server(self, prompt: str, timeout: int, files: Dict[str, str]) -> str:
+        """Run one turn, in a fresh workspace holding `files` when one is configured."""
+        if self.workspace_root is None:
+            return self._run_turn(prompt, timeout, None)
+        with tempfile.TemporaryDirectory(dir=self.workspace_root) as workspace:
+            for name, text in files.items():
+                # newline="": the program's bytes as written, CRLF included.
+                with open(os.path.join(workspace, name), "w", encoding="utf-8", newline="") as f:
+                    f.write(text)
+            return self._run_turn(prompt, timeout, workspace)
+
+    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str]) -> str:
         deadline = time.monotonic() + timeout
-        session = self._start_session()
+        session = self._start_session(cwd)
         try:
             # JSON-RPC handshake (any request before this is rejected by the server).
             session.request("initialize", {"clientInfo": _CLIENT_INFO}, deadline)
@@ -309,10 +345,10 @@ class CodexAppServerLLM(LLMInterface):
                 # ("read-only" | "workspace-write" | "danger-full-access"),
                 # not a {"mode": ..., "networkAccess": ...} map — current
                 # app-server versions reject the map form with -32600.
-                "sandbox": "read-only",
+                "sandbox": self.sandbox_mode,
             }
-            if self.cwd:
-                thread_params["cwd"] = self.cwd
+            if cwd is not None:
+                thread_params["cwd"] = cwd
             thread_result = session.request("thread/start", thread_params, deadline)
             thread_id = (thread_result or {}).get("thread", {}).get("id")
             if not thread_id:
@@ -377,7 +413,7 @@ class CodexAppServerLLM(LLMInterface):
             )
         return text
 
-    def _start_session(self) -> _AppServerSession:
+    def _start_session(self, cwd: Optional[str]) -> _AppServerSession:
         proc = subprocess.Popen(
             self._build_command(),
             stdin=subprocess.PIPE,
@@ -385,7 +421,7 @@ class CodexAppServerLLM(LLMInterface):
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
-            cwd=self.cwd,
+            cwd=cwd,
         )
         return _AppServerSession(proc)
 

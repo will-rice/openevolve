@@ -92,6 +92,19 @@ class LLMModelConfig:
     # GitHub Copilot CLI: run the agent with all tools pre-approved
     allow_all_tools: Optional[bool] = None
 
+    # Codex app-server: the argv that starts Codex, before `app-server` (["codex"]
+    # when unset); a launcher may go first
+    codex_command: Optional[List[str]] = None
+
+    # Codex app-server: the thread's sandbox, a Codex SandboxMode ("read-only" when
+    # unset, "workspace-write" or "danger-full-access")
+    sandbox_mode: Optional[str] = None
+
+    # Codex app-server: when set, each call runs Codex in a fresh directory made
+    # under it, holding the program being evolved, and removed after the call. A
+    # sandbox that can write requires it, so concurrent calls never share a cwd
+    workspace_root: Optional[str] = None
+
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None
