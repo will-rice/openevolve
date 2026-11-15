@@ -24,15 +24,15 @@ class EvaluationResult:
         ❌ Wrong:   {"combined_score": 0.85, "prompt_length": 7, "execution_time": 3}
     """
 
-    metrics: Dict[str, float]  # mandatory - existing contract
+    metrics: Dict[str, Union[float, str]]  # mandatory - existing contract
     artifacts: Dict[str, Union[str, bytes]] = field(default_factory=dict)  # optional side-channel
 
     @classmethod
-    def from_dict(cls, metrics: Dict[str, float]) -> "EvaluationResult":
+    def from_dict(cls, metrics: Dict[str, Union[float, str]]) -> "EvaluationResult":
         """Auto-wrap dict returns for backward compatibility"""
         return cls(metrics=metrics)
 
-    def to_dict(self) -> Dict[str, float]:
+    def to_dict(self) -> Dict[str, Union[float, str]]:
         """Backward compatibility - return just metrics"""
         return self.metrics
 

@@ -994,6 +994,7 @@ class ProcessParallelController:
                     if target_score is not None and child_program.metrics:
                         if (
                             "combined_score" in child_program.metrics
+                            and not isinstance(child_program.metrics["combined_score"], str)
                             and child_program.metrics["combined_score"] >= target_score
                         ):
                             logger.info(

@@ -263,8 +263,10 @@ async def _run_coevolution(
             for key, value in old.get("schedule", {}).items():
                 setattr(engine.database, key, copy.deepcopy(value))
             champion = await engine.run(iterations=iterations_per_phase)
-            if champion is None or not math.isfinite(
-                champion.metrics.get("combined_score", float("nan"))
+            if (
+                champion is None
+                or not isinstance(score := champion.metrics.get("combined_score"), (int, float))
+                or not math.isfinite(score)
             ):
                 raise ValueError(f"No valid champion for {name}")
             updated = copy.deepcopy(state)

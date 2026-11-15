@@ -103,7 +103,7 @@ class Program:
     iteration_found: int = 0  # Track which iteration this program was found
 
     # Performance metrics
-    metrics: Dict[str, float] = field(default_factory=dict)
+    metrics: Dict[str, Union[float, str]] = field(default_factory=dict)
 
     # Derived features
     complexity: float = 0.0
@@ -704,14 +704,13 @@ class ProgramDatabase:
             logger.info(f"Updated best program tracking from {old_id} to {self.best_program_id}")
 
             # Also log the scores to help understand the update
-            if (
-                old_id
-                and old_id in self.programs
-                and "combined_score" in self.programs[old_id].metrics
-                and "combined_score" in self.programs[self.best_program_id].metrics
-            ):
-                old_score = self.programs[old_id].metrics["combined_score"]
-                new_score = self.programs[self.best_program_id].metrics["combined_score"]
+            old_score = (
+                self.programs[old_id].metrics.get("combined_score")
+                if old_id and old_id in self.programs
+                else None
+            )
+            new_score = self.programs[self.best_program_id].metrics.get("combined_score")
+            if isinstance(old_score, (int, float)) and isinstance(new_score, (int, float)):
                 logger.info(
                     f"Score change: {old_score:.4f} → {new_score:.4f} ({new_score-old_score:+.4f})"
                 )
@@ -1046,6 +1045,10 @@ class ProgramDatabase:
             if dim in program.metrics:
                 # Use custom metric from evaluator
                 score = program.metrics[dim]
+                if isinstance(score, str):
+                    raise ValueError(
+                        f"Feature dimension '{dim}' must be numeric to bin, got {score!r}"
+                    )
                 # Update stats and scale
                 self._update_feature_stats(dim, score)
                 scaled_value = self._scale_feature_value(dim, score)
@@ -1432,9 +1435,9 @@ class ProgramDatabase:
             self.best_program_id = program.id
 
             # Log the change
-            if "combined_score" in program.metrics and "combined_score" in current_best.metrics:
-                old_score = current_best.metrics["combined_score"]
-                new_score = program.metrics["combined_score"]
+            old_score = current_best.metrics.get("combined_score")
+            new_score = program.metrics.get("combined_score")
+            if isinstance(old_score, (int, float)) and isinstance(new_score, (int, float)):
                 score_diff = new_score - old_score
                 logger.info(
                     f"New best program {program.id} replaces {old_id} (combined_score: {old_score:.4f} → {new_score:.4f}, +{score_diff:.4f})"
@@ -1478,12 +1481,9 @@ class ProgramDatabase:
             self.island_best_programs[island_idx] = program.id
 
             # Log the change
-            if (
-                "combined_score" in program.metrics
-                and "combined_score" in current_island_best.metrics
-            ):
-                old_score = current_island_best.metrics["combined_score"]
-                new_score = program.metrics["combined_score"]
+            old_score = current_island_best.metrics.get("combined_score")
+            new_score = program.metrics.get("combined_score")
+            if isinstance(old_score, (int, float)) and isinstance(new_score, (int, float)):
                 score_diff = new_score - old_score
                 logger.debug(
                     f"Island {island_idx}: New best program {program.id} replaces {old_id} "

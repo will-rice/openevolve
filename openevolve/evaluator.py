@@ -236,7 +236,7 @@ class Evaluator:
         self,
         program_code: str,
         program_id: str = "",
-    ) -> Dict[str, float]:
+    ) -> Dict[str, Union[float, str]]:
         """
         Evaluate a program and return scores
 
@@ -296,6 +296,8 @@ class Evaluator:
                     # Combine metrics
                     llm_scores = []
                     for name, value in llm_eval_result.metrics.items():
+                        if isinstance(value, str):
+                            continue
                         weighted_value = value * self.config.llm_feedback_weight
                         eval_result.metrics[f"llm_{name}"] = weighted_value
                         llm_scores.append(value)  # Use unweighted value for average
@@ -312,9 +314,10 @@ class Evaluator:
                             # Original combined_score is just accuracy
                             accuracy = eval_result.metrics["combined_score"]
                             # Combine with LLM average (70% accuracy, 30% LLM quality)
-                            eval_result.metrics["combined_score"] = (
-                                accuracy * 0.7 + llm_average * 0.3
-                            )
+                            if not isinstance(accuracy, str):
+                                eval_result.metrics["combined_score"] = (
+                                    accuracy * 0.7 + llm_average * 0.3
+                                )
 
                 # Store artifacts if enabled and present
                 if (
@@ -575,7 +578,7 @@ class Evaluator:
                 return stage1_eval_result
 
             # Merge results from stage 1 and 2
-            merged_metrics = {}
+            merged_metrics: Dict[str, Union[float, str]] = {}
             # Normalize numeric scores while preserving boolean flags as metadata
             for name, value in stage1_eval_result.metrics.items():
                 if isinstance(value, (int, float)) and name != "error":
@@ -794,7 +797,7 @@ class Evaluator:
             "evaluation_file": self.evaluation_file,
         }
 
-    def _passes_threshold(self, metrics: Dict[str, float], threshold: float) -> bool:
+    def _passes_threshold(self, metrics: Dict[str, Union[float, str]], threshold: float) -> bool:
         """
         Check if metrics pass a threshold
 

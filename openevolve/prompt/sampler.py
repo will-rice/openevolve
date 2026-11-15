@@ -52,7 +52,7 @@ class PromptSampler:
         self,
         current_program: str = "",
         parent_program: str = "",
-        program_metrics: Dict[str, float] = {},
+        program_metrics: Dict[str, Union[float, str]] = {},
         previous_programs: List[Dict[str, Any]] = [],
         top_programs: List[Dict[str, Any]] = [],
         inspirations: List[Dict[str, Any]] = [],  # Add inspirations parameter
@@ -185,7 +185,7 @@ class PromptSampler:
             "user": user_message,
         }
 
-    def _format_metrics(self, metrics: Dict[str, float]) -> str:
+    def _format_metrics(self, metrics: Dict[str, Union[float, str]]) -> str:
         """Format metrics for the prompt using safe formatting"""
         # Use safe formatting to handle mixed numeric and string values
         formatted_parts = []
@@ -203,7 +203,7 @@ class PromptSampler:
         self,
         current_program: str,
         parent_program: str,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Union[float, str]],
         previous_programs: List[Dict[str, Any]],
         feature_dimensions: Optional[List[str]] = None,
     ) -> str:

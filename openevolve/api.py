@@ -196,7 +196,7 @@ async def _run_evolution_async(
             metrics = best_program.metrics or {}
 
             if "combined_score" in metrics:
-                best_score = metrics["combined_score"]
+                best_score = float(metrics["combined_score"])
             elif metrics:
                 numeric_metrics = [v for v in metrics.values() if isinstance(v, (int, float))]
                 if numeric_metrics:
