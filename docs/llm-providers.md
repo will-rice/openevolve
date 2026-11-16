@@ -126,11 +126,12 @@ llm:
 
 Each call speaks newline-delimited JSON-RPC to a short-lived `codex app-server` process over stdio (unsupported on Windows). Threads run non-interactive: tool approvals are `never` and the sandbox is read-only by default, so responses are generated without mutating your workspace.
 
-Per model, three options change that:
+Per model, four options change that:
 
 - `sandbox_mode`: the thread's Codex sandbox, `read-only` (default), `workspace-write` or `danger-full-access`. With `workspace-write` Codex can write its working directory (and, by Codex's defaults, `/tmp` and `$TMPDIR`), so it can run and test its draft before it answers; the network stays off.
 - `workspace_root`: each call runs Codex in a fresh directory made under it, holding the program being evolved as `program<file_suffix>` and each program the prompt may show (top, diverse, inspirations) as `<id><file_suffix>`, and removes it when the call ends. A `top_program.txt` or `inspiration_program.txt` template can then name a program's file with `./{program_id}<file_suffix>` instead of showing its code (`{program_snippet}`), so a prompt does not grow with the programs. A sandbox that can write requires it, so calls that run at once never share a working directory.
 - `codex_command`: the argv that starts Codex, before `app-server` (default `["codex"]`): a launcher that caps its resources, or a `codex` outside `PATH`.
+- `reply_file`: with a writable `sandbox_mode`, a file of the call's directory, e.g. `program<file_suffix>`, whose text, once the turn completes, is the reply in place of Codex's last message. With `diff_based_evolution: false`, Codex edits the program in place, in as many tool calls as it needs, and the file it leaves is the child: the full-rewrite path takes a reply with no code fence whole. A timed-out or failed turn gives no reply, so a half-edited file is never a child; an unchanged file is rejected as identical to the parent; a file that is gone, is not UTF-8 or holds a code fence (which the full-rewrite parser would cut at) raises `CodexReplyFileError`, without the configured retries.
 
 ```yaml
 llm:
@@ -139,6 +140,7 @@ llm:
     - name: "gpt-5.3-codex"
       sandbox_mode: "workspace-write"
       workspace_root: "/scratch/openevolve-codex"
+      reply_file: "program.py"  # with diff_based_evolution: false
 ```
 
 A turn that ends on the account's usage limit (the app-server's `error` notification with `codexErrorInfo: "usageLimitExceeded"`) raises `CodexUsageLimitError` at once, without the configured retries, since another call only meets the same limit; its message is Codex's, which says when the limit resets. The iteration fails as for any other error unless the caller waits the limit out, for example with an `init_client` that wraps `CodexAppServerLLM.generate_with_context`.

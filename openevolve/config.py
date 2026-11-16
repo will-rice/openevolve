@@ -105,6 +105,14 @@ class LLMModelConfig:
     # sandbox that can write requires it, so concurrent calls never share a cwd
     workspace_root: Optional[str] = None
 
+    # Codex app-server: when set, a file of the call's workspace (e.g. "program.py")
+    # whose text, once the turn completes, is the reply in place of the agent's
+    # message, so the model edits the program in place instead of emitting it. It
+    # needs a writable sandbox_mode (and so a workspace_root) and pairs with full
+    # rewrites (diff_based_evolution=false), which take a reply with no code fence
+    # as the program verbatim
+    reply_file: Optional[str] = None
+
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None

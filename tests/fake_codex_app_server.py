@@ -1,7 +1,7 @@
 """A fake `codex app-server` process for tests: standard library only.
 
-Started as `python fake_codex_app_server.py <log> <sleep> <reply> app-server` through the
-provider's `codex_command`. It answers the requests the provider sends with the
+Started as `python fake_codex_app_server.py <log> <sleep> <reply> [<program>] app-server`
+through the provider's `codex_command`. It answers the requests the provider sends with the
 shapes a real app-server returns (initialize, account/read with a ChatGPT login,
 thread/start, turn/start, then item/completed and turn/completed notifications)
 and appends one JSON line per turn to <log>: its process cwd, the thread's cwd and
@@ -9,7 +9,9 @@ sandbox, the turn's prompt, and the files of the thread's cwd, if it has one, wi
 their text. It sleeps <sleep> seconds
 before answering a turn, and answers it with <reply>; a <reply> naming a .jsonl file
 instead ends the turn with that file's notifications, a recorded failure
-(codex_usage_limit_turn.jsonl).
+(codex_usage_limit_turn.jsonl). With <program>, each turn first writes it to
+program.py in the thread's cwd, as a model editing the program in place does, or
+deletes program.py when <program> is "-"; the turn's log records the files before.
 """
 
 import json
@@ -20,6 +22,8 @@ import time
 log_path = sys.argv[1]
 sleep = float(sys.argv[2])
 reply = sys.argv[3]
+# The arguments end with "app-server", which the provider appends.
+program = sys.argv[4] if len(sys.argv) == 6 else None
 thread = {}
 
 
@@ -38,11 +42,18 @@ for line in sys.stdin:
         thread = params
         send({"id": request["id"], "result": {"thread": {"id": "thread-1"}}})
     elif method == "turn/start":
-        time.sleep(sleep)
         files = {}
         for name in sorted(os.listdir(thread["cwd"]) if thread.get("cwd") else []):
             with open(os.path.join(thread["cwd"], name), encoding="utf-8", newline="") as f:
                 files[name] = f.read()
+        if program is not None:
+            target = os.path.join(thread["cwd"], "program.py")
+            if program == "-":
+                os.remove(target)
+            else:
+                with open(target, "w", encoding="utf-8", newline="") as f:
+                    f.write(program)
+        time.sleep(sleep)
         record = {
             "process_cwd": os.getcwd(),
             "thread_cwd": thread.get("cwd"),

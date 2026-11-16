@@ -42,6 +42,14 @@ Notes:
   `<id><file_suffix>`), removed when the call ends. A sandbox that
   can write ("workspace-write", "danger-full-access") requires it, so calls that
   run at once never write one cwd.
+- With `reply_file` (a writable sandbox only), the reply is that file of the
+  call's workspace as the completed turn left it, in place of the agent's message:
+  the model edits the program in place, in as many tool calls as it needs, and the
+  file is the child, taken whole by OpenEvolve's full-rewrite path
+  (utils/code_utils.py:parse_full_rewrite, whose reply without a code fence is the
+  program verbatim). Only a turn that completed is read; a file that is gone, is not
+  UTF-8 or holds a code fence (which the full-rewrite path would cut) raises
+  CodexReplyFileError, never retried: another turn starts over from the parent.
 - A turn that ends on the account's usage limit (the app-server's `error`
   notification with `codexErrorInfo` "usageLimitExceeded") raises
   CodexUsageLimitError at once, never retried: another call only meets the same
@@ -93,6 +101,14 @@ class CodexAuthError(RuntimeError):
             f"{message} Run `codex login` (browser flow) or `codex login --device-code` "
             "to authenticate with your ChatGPT account first."
         )
+
+
+class CodexReplyFileError(RuntimeError):
+    """Raised when a completed turn's `reply_file` cannot be the reply.
+
+    The file is gone, is not UTF-8, or holds a code fence. The turn is not retried:
+    a retry starts over from the parent in a fresh workspace, at another turn's cost.
+    """
 
 
 class CodexUsageLimitError(RuntimeError):
@@ -252,6 +268,7 @@ class CodexAppServerLLM(LLMInterface):
         self.codex_command = list(_cfg_value(model_cfg, "codex_command", ["codex"]))
         self.sandbox_mode = _cfg_value(model_cfg, "sandbox_mode", "read-only")
         self.workspace_root = getattr(model_cfg, "workspace_root", None)
+        self.reply_file = getattr(model_cfg, "reply_file", None)
         if self.sandbox_mode not in VALID_SANDBOX_MODES:
             raise ValueError(
                 f"Invalid sandbox_mode: {self.sandbox_mode}. "
@@ -261,6 +278,11 @@ class CodexAppServerLLM(LLMInterface):
             raise ValueError(
                 f"sandbox_mode {self.sandbox_mode} needs a workspace_root, so that "
                 "concurrent calls never write one working directory"
+            )
+        if self.reply_file is not None and self.sandbox_mode == "read-only":
+            raise ValueError(
+                f"reply_file {self.reply_file} needs a writable sandbox_mode, in which "
+                "the model can edit it"
             )
         if (
             self.reasoning_effort is not None
@@ -314,6 +336,9 @@ class CodexAppServerLLM(LLMInterface):
             except CodexUsageLimitError:
                 # Retrying at once meets the same limit; the caller waits it out.
                 raise
+            except CodexReplyFileError as e:
+                logger.error(f"Codex app-server reply file unusable (not retried): {e}")
+                raise
             except asyncio.TimeoutError:
                 if attempt < retries:
                     logger.warning(
@@ -345,7 +370,28 @@ class CodexAppServerLLM(LLMInterface):
                 # newline="": the program's bytes as written, CRLF included.
                 with open(os.path.join(workspace, name), "w", encoding="utf-8", newline="") as f:
                     f.write(text)
-            return self._run_turn(prompt, timeout, workspace)
+            # Returns only once the turn completed; a timeout or a failed turn raises
+            # first, so a half-edited reply_file is never read.
+            message = self._run_turn(prompt, timeout, workspace)
+            if self.reply_file is None:
+                return message
+            return self._read_reply_file(os.path.join(workspace, self.reply_file))
+
+    def _read_reply_file(self, path: str) -> str:
+        """The completed turn's `reply_file`, byte for byte, as the reply."""
+        try:
+            with open(path, encoding="utf-8", newline="") as f:
+                text = f.read()
+        except FileNotFoundError:
+            raise CodexReplyFileError(f"the turn left no {self.reply_file}") from None
+        except UnicodeDecodeError as e:
+            raise CodexReplyFileError(f"{self.reply_file} is not UTF-8: {e}") from None
+        if "```" in text:
+            raise CodexReplyFileError(
+                f"{self.reply_file} holds a code fence (```), which the full-rewrite "
+                "parser would take as the end of the program"
+            )
+        return text
 
     def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str]) -> str:
         deadline = time.monotonic() + timeout
@@ -433,11 +479,12 @@ class CodexAppServerLLM(LLMInterface):
                 if error.get("codexErrorInfo") == USAGE_LIMIT_EXCEEDED:
                     raise CodexUsageLimitError(error["message"])
                 raise RuntimeError(f"codex app-server reported an error: {params}")
-        if not text or not text.strip():
+        if self.reply_file is None and (not text or not text.strip()):
             raise RuntimeError(
                 f"Empty response from codex app-server. stderr: {session.stderr_summary()}"
             )
-        return text
+        # With reply_file the message is not the reply, and may be absent.
+        return text or ""
 
     def _start_session(self, cwd: Optional[str]) -> _AppServerSession:
         proc = subprocess.Popen(

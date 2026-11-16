@@ -193,6 +193,7 @@ def _make_cfg(**overrides):
         "codex_command": None,
         "sandbox_mode": None,
         "workspace_root": None,
+        "reply_file": None,
         "init_client": None,
         "provider": None,
     }

@@ -14,7 +14,8 @@ from pathlib import Path
 
 from openevolve import OpenEvolve
 from openevolve.config import Config, LLMModelConfig
-from openevolve.llm.codex_app_server import CodexAppServerLLM
+from openevolve.controller import EvolutionFailedError
+from openevolve.llm.codex_app_server import CodexAppServerLLM, CodexReplyFileError
 
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
 
@@ -107,6 +108,68 @@ class TestSandboxAndWorkspace(unittest.TestCase):
     def test_an_unknown_sandbox_mode_is_refused(self):
         with self.assertRaisesRegex(ValueError, "sandbox_mode"):
             CodexAppServerLLM(model_config(self.log, sandbox_mode="read_only"))
+
+
+class TestReplyFile(unittest.TestCase):
+    """With reply_file, the completed turn's file is the reply, not the message."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp = Path(directory.name)
+        self.log = self.tmp / "turns.jsonl"
+        self.root = self.tmp / "workspaces"
+        self.root.mkdir()
+
+    def editing(self, program: str, **changes) -> CodexAppServerLLM:
+        """A writable provider whose fake writes `program` to program.py, replying "done"."""
+        command = [sys.executable, str(FAKE), str(self.log), str(changes.pop("sleep", 0))]
+        values = {
+            "codex_command": [*command, "done", program],
+            "sandbox_mode": "workspace-write",
+            "workspace_root": str(self.root),
+            "reply_file": "program.py",
+        }
+        return CodexAppServerLLM(model_config(self.log, **{**values, **changes}))
+
+    def test_the_edited_file_is_the_reply_byte_for_byte(self):
+        llm = self.editing("x = 2\r\ny = 3\n")
+
+        reply = asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+        [turn] = turns(self.log)
+        self.assertEqual(turn["files"]["program.py"], "x = 1\n")
+        self.assertEqual(reply, "x = 2\r\ny = 3\n")
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_file_the_turn_removed_fails_without_a_retry(self):
+        llm = self.editing("-", retries=1)
+
+        with self.assertRaisesRegex(CodexReplyFileError, "left no program.py"):
+            asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+        self.assertEqual(len(turns(self.log)), 1)
+
+    def test_a_file_holding_a_code_fence_fails(self):
+        """The full-rewrite parser would take the fence as the program's end."""
+        llm = self.editing("x = 1\n# ```\ny = 2\n")
+
+        with self.assertRaisesRegex(CodexReplyFileError, "code fence"):
+            asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+    def test_a_turn_that_times_out_mid_edit_returns_no_file(self):
+        """The fake has written program.py when the turn runs out of time."""
+        llm = self.editing("half = ", sleep=5, timeout=1)
+
+        with self.assertRaises(Exception) as raised:
+            asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+        self.assertNotIsInstance(raised.exception, CodexReplyFileError)
+        self.assertNotIn("half = ", str(raised.exception))
+
+    def test_a_read_only_sandbox_cannot_reply_with_a_file(self):
+        with self.assertRaisesRegex(ValueError, "writable"):
+            CodexAppServerLLM(model_config(self.log, reply_file="program.py"))
 
 
 # The program the run evolves, and the codex reply that edits it: a SEARCH/REPLACE
@@ -204,6 +267,64 @@ class TestRunWorkspace(unittest.TestCase):
         [seed_id] = [p.id for p in run.database.programs.values() if p.parent_id is None]
         self.assertIn(f"### Program 1 (Score: 0.5000): ./{seed_id}.py", turn["prompt"])
         self.assertEqual(turn["files"][f"{seed_id}.py"], INITIAL_PROGRAM)
+
+
+class TestRunEditsInPlace(unittest.TestCase):
+    """A real OpenEvolve run with full rewrites whose reply is the edited program.py."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp = Path(directory.name)
+
+    def run_editing(self, program: str) -> OpenEvolve:
+        """One iteration whose codex writes `program` to program.py.
+
+        Raises:
+            EvolutionFailedError: The iteration produced no child.
+        """
+        log, root = self.tmp / "turns.jsonl", self.tmp / "workspaces"
+        root.mkdir()
+        (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
+        (self.tmp / "evaluator.py").write_text(EVALUATOR)
+        config = Config()
+        config.diff_based_evolution = False
+        config.evaluator.parallel_evaluations = 1
+        config.database.num_islands = 1
+        config.database.in_memory = True
+        command = [sys.executable, str(FAKE), str(log), "0", "done", program]
+        config.llm.models = [
+            model_config(
+                log,
+                codex_command=command,
+                sandbox_mode="workspace-write",
+                workspace_root=str(root),
+                reply_file="program.py",
+            )
+        ]
+        config.llm.evaluator_models = config.llm.models
+        run = OpenEvolve(
+            initial_program_path=str(self.tmp / "initial_program.py"),
+            evaluation_file=str(self.tmp / "evaluator.py"),
+            config=config,
+            output_dir=str(self.tmp / "out"),
+        )
+        asyncio.run(run.run(iterations=1))
+        return run
+
+    def test_the_edited_file_is_the_child(self):
+        edited = "def f():\n    return 1\n"
+
+        run = self.run_editing(edited)
+
+        [child] = [p for p in run.database.programs.values() if p.parent_id is not None]
+        self.assertEqual(child.code, edited)
+        self.assertEqual(child.metadata["evolution_mode"], "full_rewrite")
+
+    def test_an_unchanged_file_fails_the_iteration(self):
+        """No silent fallback: the parent is not submitted again as its own child."""
+        with self.assertRaisesRegex(EvolutionFailedError, "identical to the parent"):
+            self.run_editing(INITIAL_PROGRAM)
 
 
 if __name__ == "__main__":
