@@ -42,6 +42,10 @@ Notes:
   `<id><file_suffix>`), removed when the call ends. A sandbox that
   can write ("workspace-write", "danger-full-access") requires it, so calls that
   run at once never write one cwd.
+- A turn that ends on the account's usage limit (the app-server's `error`
+  notification with `codexErrorInfo` "usageLimitExceeded") raises
+  CodexUsageLimitError at once, never retried: another call only meets the same
+  limit. The caller decides when to try again.
 - The stdio transport is unsupported on Windows; the backend expects a POSIX
   shell there.
 """
@@ -70,6 +74,11 @@ VALID_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
+# TurnError.codexErrorInfo of a turn that hit the account's usage limit: codex maps
+# its UsageLimitReached, QuotaExceeded and UsageNotIncluded errors to it
+# (codex-rs/protocol/src/error.rs:470-472, rust-v0.161.0).
+USAGE_LIMIT_EXCEEDED = "usageLimitExceeded"
+
 
 class CodexAuthError(RuntimeError):
     """Raised when the Codex app-server reports no usable ChatGPT login.
@@ -84,6 +93,14 @@ class CodexAuthError(RuntimeError):
             f"{message} Run `codex login` (browser flow) or `codex login --device-code` "
             "to authenticate with your ChatGPT account first."
         )
+
+
+class CodexUsageLimitError(RuntimeError):
+    """Raised when a turn ends on the account's usage limit.
+
+    Its message is codex's, which names when the limit resets when codex knows
+    ("You've hit your usage limit. ... try again at Nov 16th, 2026 1:40 PM.").
+    """
 
 
 def _cfg_value(model_cfg: Any, attr: str, default: Any) -> Any:
@@ -294,6 +311,9 @@ class CodexAppServerLLM(LLMInterface):
                 # Retrying cannot help until the user logs in; fail immediately.
                 logger.error(f"Codex app-server authentication error (not retried): {e}")
                 raise
+            except CodexUsageLimitError:
+                # Retrying at once meets the same limit; the caller waits it out.
+                raise
             except asyncio.TimeoutError:
                 if attempt < retries:
                     logger.warning(
@@ -407,6 +427,11 @@ class CodexAppServerLLM(LLMInterface):
                     raise RuntimeError(f"codex app-server turn did not complete: {status}")
                 break
             elif method == "error":
+                # ErrorNotification: a TurnError and whether codex retries the turn
+                # itself (codex-rs/app-server-protocol/src/protocol/v2/notification.rs:62-69).
+                error = params["error"]
+                if error.get("codexErrorInfo") == USAGE_LIMIT_EXCEEDED:
+                    raise CodexUsageLimitError(error["message"])
                 raise RuntimeError(f"codex app-server reported an error: {params}")
         if not text or not text.strip():
             raise RuntimeError(

@@ -7,7 +7,9 @@ thread/start, turn/start, then item/completed and turn/completed notifications)
 and appends one JSON line per turn to <log>: its process cwd, the thread's cwd and
 sandbox, the turn's prompt, and the files of the thread's cwd, if it has one, with
 their text. It sleeps <sleep> seconds
-before answering a turn, and answers it with <reply>.
+before answering a turn, and answers it with <reply>; a <reply> naming a .jsonl file
+instead ends the turn with that file's notifications, a recorded failure
+(codex_usage_limit_turn.jsonl).
 """
 
 import json
@@ -51,6 +53,11 @@ for line in sys.stdin:
         with open(log_path, "a") as log:
             log.write(json.dumps(record) + "\n")
         send({"id": request["id"], "result": {}})
+        if reply.endswith(".jsonl"):
+            with open(reply, encoding="utf-8") as recorded:
+                for message in recorded:
+                    send(json.loads(message))
+            continue
         item = {"id": "item-1", "type": "agentMessage", "text": reply}
         send({"method": "item/completed", "params": {"item": item}})
         turn = {"id": "turn-1", "status": "completed"}

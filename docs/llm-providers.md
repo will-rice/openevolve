@@ -141,6 +141,8 @@ llm:
       workspace_root: "/scratch/openevolve-codex"
 ```
 
+A turn that ends on the account's usage limit (the app-server's `error` notification with `codexErrorInfo: "usageLimitExceeded"`) raises `CodexUsageLimitError` at once, without the configured retries, since another call only meets the same limit; its message is Codex's, which says when the limit resets. The iteration fails as for any other error unless the caller waits the limit out, for example with an `init_client` that wraps `CodexAppServerLLM.generate_with_context`.
+
 ## Cost Estimation
 
 **Cost depends on your LLM provider and iterations:**
