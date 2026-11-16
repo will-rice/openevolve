@@ -38,7 +38,8 @@ Notes:
   the tree while generating a response.
 - With `workspace_root`, each call runs Codex in a fresh directory under it
   holding the call's `workspace_files` (the evolution loop passes the parent
-  program, `program<file_suffix>`), removed when the call ends. A sandbox that
+  program, `program<file_suffix>`, and each program the prompt may show,
+  `<id><file_suffix>`), removed when the call ends. A sandbox that
   can write ("workspace-write", "danger-full-access") requires it, so calls that
   run at once never write one cwd.
 - The stdio transport is unsupported on Windows; the backend expects a POSIX

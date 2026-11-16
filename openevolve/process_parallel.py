@@ -316,9 +316,18 @@ def _run_iteration(
                 _worker_llm_ensemble.generate_with_context(
                     system_message=prompt["system"],
                     messages=[{"role": "user", "content": prompt["user"]}],
-                    # The program being evolved, as a file of a backend's workspace
-                    # (codex_app_server's workspace_root); other backends ignore it.
-                    workspace_files={f"program{_worker_config.file_suffix}": parent.code},
+                    # The program being evolved, and every program the prompt may
+                    # show (top, diverse, inspirations), as files of a backend's
+                    # workspace (codex_app_server's workspace_root), each named by
+                    # the id its template's {program_id} gives; other backends
+                    # ignore them.
+                    workspace_files={
+                        f"program{_worker_config.file_suffix}": parent.code,
+                        **{
+                            f"{p.id}{_worker_config.file_suffix}": p.code
+                            for p in [*programs_for_prompt, *inspirations]
+                        },
+                    },
                 )
             )
             token_usage = getattr(_worker_llm_ensemble, "last_usage", None)

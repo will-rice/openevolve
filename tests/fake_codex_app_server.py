@@ -5,7 +5,8 @@ provider's `codex_command`. It answers the requests the provider sends with the
 shapes a real app-server returns (initialize, account/read with a ChatGPT login,
 thread/start, turn/start, then item/completed and turn/completed notifications)
 and appends one JSON line per turn to <log>: its process cwd, the thread's cwd and
-sandbox, and the files of the thread's cwd, if it has one, with their text. It sleeps <sleep> seconds
+sandbox, the turn's prompt, and the files of the thread's cwd, if it has one, with
+their text. It sleeps <sleep> seconds
 before answering a turn, and answers it with <reply>.
 """
 
@@ -44,6 +45,7 @@ for line in sys.stdin:
             "process_cwd": os.getcwd(),
             "thread_cwd": thread.get("cwd"),
             "sandbox": thread.get("sandbox"),
+            "prompt": params["input"][0]["text"],
             "files": files,
         }
         with open(log_path, "a") as log:

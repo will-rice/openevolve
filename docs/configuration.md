@@ -233,6 +233,8 @@ prompt:
 
 **How it works:** Place `{greeting}` or `{improvement_suggestion}` placeholders in your templates, and OpenEvolve will randomly choose from the variations for each generation, adding diversity to prompts.
 
+`top_program.txt` and `inspiration_program.txt` get each program's `{program_id}` beside its `{program_snippet}`; with `codex_app_server`'s `workspace_root` the call's directory holds that program as `<program_id><file_suffix>` ([LLM providers](llm-providers.md)).
+
 See [prompt examples](../examples/llm_prompt_optimization/templates/) for complete template customization.
 
 ## Island Scheduling

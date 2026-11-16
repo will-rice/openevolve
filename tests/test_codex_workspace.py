@@ -155,11 +155,55 @@ class TestRunWorkspace(unittest.TestCase):
         best = asyncio.run(run.run(iterations=1))
 
         [turn] = turns(log)
+        [seed_id] = [p.id for p in run.database.programs.values() if p.parent_id is None]
         self.assertEqual(turn["sandbox"], "workspace-write")
-        self.assertEqual(turn["files"], {"program.py": INITIAL_PROGRAM})
+        self.assertEqual(
+            turn["files"],
+            {"program.py": INITIAL_PROGRAM, f"{seed_id}.py": INITIAL_PROGRAM},
+        )
         self.assertNotEqual(turn["process_cwd"], os.getcwd())
         self.assertEqual(list(root.iterdir()), [])
         self.assertIsNotNone(best)
+
+    def test_a_template_names_the_workspace_file_of_each_program_it_shows(self):
+        """A top_program template that shows `./{program_id}.py`, not the code, names
+        a file the call's workspace holds, with that program's code."""
+        log, root, templates = (self.tmp / n for n in ("turns.jsonl", "ws", "prompts"))
+        root.mkdir()
+        templates.mkdir()
+        (templates / "top_program.txt").write_text(
+            "### Program {program_number} (Score: {score}): ./{program_id}.py"
+        )
+        (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
+        (self.tmp / "evaluator.py").write_text(EVALUATOR)
+        config = Config()
+        config.evaluator.parallel_evaluations = 1
+        config.database.num_islands = 1
+        config.database.in_memory = True
+        config.prompt.template_dir = str(templates)
+        command = [sys.executable, str(FAKE), str(log), "0", DIFF_REPLY]
+        config.llm.models = [
+            model_config(
+                log,
+                codex_command=command,
+                sandbox_mode="workspace-write",
+                workspace_root=str(root),
+            )
+        ]
+        config.llm.evaluator_models = config.llm.models
+        run = OpenEvolve(
+            initial_program_path=str(self.tmp / "initial_program.py"),
+            evaluation_file=str(self.tmp / "evaluator.py"),
+            config=config,
+            output_dir=str(self.tmp / "out"),
+        )
+
+        asyncio.run(run.run(iterations=1))
+
+        [turn] = turns(log)
+        [seed_id] = [p.id for p in run.database.programs.values() if p.parent_id is None]
+        self.assertIn(f"### Program 1 (Score: 0.5000): ./{seed_id}.py", turn["prompt"])
+        self.assertEqual(turn["files"][f"{seed_id}.py"], INITIAL_PROGRAM)
 
 
 if __name__ == "__main__":

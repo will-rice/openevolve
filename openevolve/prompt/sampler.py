@@ -380,6 +380,7 @@ class PromptSampler:
             top_programs_str += (
                 top_program_template.format(
                     program_number=i + 1,
+                    program_id=program.get("id"),
                     score=f"{score:.4f}",
                     language=("text" if self.config.programs_as_changes_description else language),
                     program_snippet=program_code,
@@ -439,6 +440,7 @@ class PromptSampler:
                     diverse_programs_str += (
                         top_program_template.format(
                             program_number=f"D{i + 1}",
+                            program_id=program.get("id"),
                             score=f"{score:.4f}",
                             language=(
                                 "text" if self.config.programs_as_changes_description else language
@@ -517,6 +519,7 @@ class PromptSampler:
             inspiration_programs_str += (
                 inspiration_program_template.format(
                     program_number=i + 1,
+                    program_id=program.get("id"),
                     score=f"{score:.4f}",
                     program_type=program_type,
                     language=("text" if self.config.programs_as_changes_description else language),

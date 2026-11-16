@@ -129,7 +129,7 @@ Each call speaks newline-delimited JSON-RPC to a short-lived `codex app-server` 
 Per model, three options change that:
 
 - `sandbox_mode`: the thread's Codex sandbox, `read-only` (default), `workspace-write` or `danger-full-access`. With `workspace-write` Codex can write its working directory (and, by Codex's defaults, `/tmp` and `$TMPDIR`), so it can run and test its draft before it answers; the network stays off.
-- `workspace_root`: each call runs Codex in a fresh directory made under it, holding the program being evolved as `program<file_suffix>`, and removes it when the call ends. A sandbox that can write requires it, so calls that run at once never share a working directory.
+- `workspace_root`: each call runs Codex in a fresh directory made under it, holding the program being evolved as `program<file_suffix>` and each program the prompt may show (top, diverse, inspirations) as `<id><file_suffix>`, and removes it when the call ends. A `top_program.txt` or `inspiration_program.txt` template can then name a program's file with `./{program_id}<file_suffix>` instead of showing its code (`{program_snippet}`), so a prompt does not grow with the programs. A sandbox that can write requires it, so calls that run at once never share a working directory.
 - `codex_command`: the argv that starts Codex, before `app-server` (default `["codex"]`): a launcher that caps its resources, or a `codex` outside `PATH`.
 
 ```yaml
