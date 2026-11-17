@@ -4,7 +4,7 @@ Evaluation result structures for OpenEvolve
 
 import json
 from dataclasses import dataclass, field
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 
 @dataclass
@@ -60,3 +60,26 @@ class EvaluationResult:
     def get_total_artifact_size(self) -> int:
         """Get total size of all artifacts in bytes"""
         return sum(self.get_artifact_size(key) for key in self.artifacts.keys())
+
+
+@dataclass(frozen=True)
+class ChildContext:
+    """What the evolution loop knows of a child it asks evaluate() to score.
+
+    An evaluation function that names a `child_context` parameter gets it with every
+    child an iteration made (process_parallel._run_iteration), and None with a program
+    no iteration made (an initial program).
+
+    Attributes:
+        program_id: The child's id, which the database stores it under.
+        parent_id: The id of the program the iteration changed.
+        island: The island the iteration worked on, where the child is placed.
+        llm_message: The model's final message of the iteration's generation, or None
+            when its backend keeps none (only codex_app_server does). With a
+            `reply_file` it is not the reply: the model can say there what it changed.
+    """
+
+    program_id: str
+    parent_id: str
+    island: int
+    llm_message: Optional[str]

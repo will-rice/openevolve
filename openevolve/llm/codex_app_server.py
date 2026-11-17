@@ -43,7 +43,8 @@ Notes:
   can write ("workspace-write", "danger-full-access") requires it, so calls that
   run at once never write one cwd.
 - With `reply_file` (a writable sandbox only), the reply is that file of the
-  call's workspace as the completed turn left it, in place of the agent's message:
+  call's workspace as the completed turn left it, in place of the agent's message,
+  which is kept as `last_message` (as it is without reply_file):
   the model edits the program in place, in as many tool calls as it needs, and the
   file is the child, taken whole by OpenEvolve's full-rewrite path
   (utils/code_utils.py:parse_full_rewrite, whose reply without a code fence is the
@@ -272,6 +273,10 @@ class CodexAppServerLLM(LLMInterface):
         self.workspace_root = getattr(model_cfg, "workspace_root", None)
         self.reply_file = getattr(model_cfg, "reply_file", None)
         self.web_search = getattr(model_cfg, "web_search", None)
+        # The final agent message of the latest turn that completed, the reply or,
+        # with reply_file, beside it; the evolution loop reads it from the ensemble
+        # (LLMEnsemble.last_message) for the evaluator (ChildContext.llm_message).
+        self.last_message: Optional[str] = None
         if self.web_search is not None and self.web_search not in VALID_WEB_SEARCH_MODES:
             raise ValueError(
                 f"Invalid web_search: {self.web_search}. "
@@ -371,8 +376,10 @@ class CodexAppServerLLM(LLMInterface):
 
     def _run_app_server(self, prompt: str, timeout: int, files: Dict[str, str]) -> str:
         """Run one turn, in a fresh workspace holding `files` when one is configured."""
+        self.last_message = None
         if self.workspace_root is None:
-            return self._run_turn(prompt, timeout, None)
+            self.last_message = self._run_turn(prompt, timeout, None)
+            return self.last_message
         with tempfile.TemporaryDirectory(dir=self.workspace_root) as workspace:
             for name, text in files.items():
                 # newline="": the program's bytes as written, CRLF included.
@@ -381,6 +388,7 @@ class CodexAppServerLLM(LLMInterface):
             # Returns only once the turn completed; a timeout or a failed turn raises
             # first, so a half-edited reply_file is never read.
             message = self._run_turn(prompt, timeout, workspace)
+            self.last_message = message
             if self.reply_file is None:
                 return message
             return self._read_reply_file(os.path.join(workspace, self.reply_file))

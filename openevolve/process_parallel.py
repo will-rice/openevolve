@@ -341,6 +341,7 @@ def _run_iteration(
                 )
             )
             token_usage = getattr(_worker_llm_ensemble, "last_usage", None)
+            llm_message = _worker_llm_ensemble.last_message
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             return _reject(error=f"LLM generation failed: {str(e)}")
@@ -452,11 +453,24 @@ def _run_iteration(
                 error=f"Generated code exceeds maximum length ({len(child_code)} > {_worker_config.max_code_length})"
             )
 
+        # Get target island from snapshot (where child should be placed)
+        target_island = db_snapshot.get("sampling_island")
+
         # Evaluate the child program
         import uuid
 
+        from openevolve.evaluation_result import ChildContext
+
         child_id = str(uuid.uuid4())
-        child_metrics = _run_worker_async(_worker_evaluator.evaluate_program(child_code, child_id))
+        child_context = ChildContext(
+            program_id=child_id,
+            parent_id=parent.id,
+            island=target_island,
+            llm_message=llm_message,
+        )
+        child_metrics = _run_worker_async(
+            _worker_evaluator.evaluate_program(child_code, child_id, child_context)
+        )
 
         # Get artifacts
         artifacts = _worker_evaluator.get_pending_artifacts(child_id)
@@ -482,9 +496,6 @@ def _run_iteration(
         )
 
         iteration_time = time.time() - iteration_start
-
-        # Get target island from snapshot (where child should be placed)
-        target_island = db_snapshot.get("sampling_island")
 
         return SerializableResult(
             child_program_dict=child_program.to_dict(),

@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from openevolve.config import EvaluatorConfig
 from openevolve.database import ProgramDatabase
-from openevolve.evaluation_result import EvaluationResult
+from openevolve.evaluation_result import ChildContext, EvaluationResult
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.utils.async_utils import TaskPool, run_in_executor
@@ -105,6 +105,11 @@ class Evaluator:
 
             self.evaluate_function = module.evaluate
             self._evaluator_kwargs = self._resolve_evaluator_kwargs(module.evaluate)
+            # An evaluate() that names a child_context parameter gets each child's
+            # ChildContext (evaluate_program).
+            self._takes_child_context = (
+                "child_context" in inspect.signature(module.evaluate).parameters
+            )
             logger.info(f"Successfully loaded evaluation function from {self.evaluation_file}")
 
             # Validate cascade configuration
@@ -236,6 +241,7 @@ class Evaluator:
         self,
         program_code: str,
         program_id: str = "",
+        child_context: Optional[ChildContext] = None,
     ) -> Dict[str, Union[float, str]]:
         """
         Evaluate a program and return scores
@@ -243,6 +249,9 @@ class Evaluator:
         Args:
             program_code: Code to evaluate
             program_id: Optional ID for logging
+            child_context: What the iteration that made the program knows of it, which
+                an evaluate() naming a `child_context` parameter gets; None for a
+                program no iteration made
 
         Returns:
             Dictionary of metric name to score
@@ -265,10 +274,10 @@ class Evaluator:
                 # Run evaluation
                 if self.config.cascade_evaluation:
                     # Run cascade evaluation
-                    result = await self._cascade_evaluate(temp_file_path)
+                    result = await self._cascade_evaluate(temp_file_path, child_context)
                 else:
                     # Run direct evaluation
-                    result = await self._direct_evaluate(temp_file_path)
+                    result = await self._direct_evaluate(temp_file_path, child_context)
 
                 # Process the result based on type
                 eval_result = self._process_evaluation_result(result)
@@ -435,13 +444,14 @@ class Evaluator:
         return self._pending_artifacts.pop(program_id, None)
 
     async def _direct_evaluate(
-        self, program_path: str
+        self, program_path: str, child_context: Optional[ChildContext] = None
     ) -> Union[Dict[str, float], EvaluationResult]:
         """
         Directly evaluate a program using the evaluation function with timeout
 
         Args:
             program_path: Path to the program file
+            child_context: Passed to an evaluate() that names a child_context parameter
 
         Returns:
             Dictionary of metrics or EvaluationResult with metrics and artifacts
@@ -451,12 +461,16 @@ class Evaluator:
             Exception: If evaluation function raises an exception
         """
 
+        kwargs = dict(self._evaluator_kwargs)
+        if self._takes_child_context:
+            kwargs["child_context"] = child_context
+
         # Create a coroutine that runs the evaluation function in an executor
         async def run_evaluation():
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
                 self._executor,
-                functools.partial(self.evaluate_function, **self._evaluator_kwargs),
+                functools.partial(self.evaluate_function, **kwargs),
                 program_path,
             )
 
@@ -468,13 +482,14 @@ class Evaluator:
         return result
 
     async def _cascade_evaluate(
-        self, program_path: str
+        self, program_path: str, child_context: Optional[ChildContext] = None
     ) -> Union[Dict[str, float], EvaluationResult]:
         """
         Run cascade evaluation with increasingly challenging test cases
 
         Args:
             program_path: Path to the program file
+            child_context: Passed to evaluate() when the module has no stage functions
 
         Returns:
             Dictionary of metrics or EvaluationResult with metrics and artifacts
@@ -489,14 +504,14 @@ class Evaluator:
 
             spec = importlib.util.spec_from_file_location("evaluation_module", self.evaluation_file)
             if spec is None or spec.loader is None:
-                return await self._direct_evaluate(program_path)
+                return await self._direct_evaluate(program_path, child_context)
 
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
             # Check if cascade functions exist
             if not hasattr(module, "evaluate_stage1"):
-                return await self._direct_evaluate(program_path)
+                return await self._direct_evaluate(program_path, child_context)
 
             # Run first stage with timeout
             try:

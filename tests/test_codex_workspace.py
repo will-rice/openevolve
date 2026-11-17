@@ -142,6 +142,24 @@ class TestReplyFile(unittest.TestCase):
         self.assertEqual(reply, "x = 2\r\ny = 3\n")
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_the_final_message_is_kept_beside_the_file(self):
+        """With reply_file the agent's message is not the reply but last_message."""
+        llm = self.editing("x = 2\n")
+
+        reply = asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+        self.assertEqual(reply, "x = 2\n")
+        self.assertEqual(llm.last_message, "done")
+
+    def test_a_turn_that_times_out_keeps_no_message(self):
+        llm = self.editing("half = ", sleep=5, timeout=1)
+        llm.last_message = "an earlier turn's"
+
+        with self.assertRaises(Exception):
+            asyncio.run(llm.generate("p", workspace_files={"program.py": "x = 1\n"}))
+
+        self.assertIsNone(llm.last_message)
+
     def test_a_file_the_turn_removed_fails_without_a_retry(self):
         llm = self.editing("-", retries=1)
 
@@ -177,6 +195,17 @@ class TestReplyFile(unittest.TestCase):
 INITIAL_PROGRAM = "def f():\n    return 0\n"
 DIFF_REPLY = "<<<<<<< SEARCH\n    return 0\n=======\n    return 1\n>>>>>>> REPLACE\n"
 EVALUATOR = "def evaluate(program_path):\n    return {'combined_score': 0.5}\n"
+# An evaluator that names child_context, and appends each one it gets, as JSON (null
+# for a program no iteration made), to contexts.jsonl beside it.
+CONTEXT_EVALUATOR = """
+import dataclasses, json, pathlib
+def evaluate(program_path, child_context):
+    log = pathlib.Path(__file__).with_name("contexts.jsonl")
+    with log.open("a") as f:
+        context = None if child_context is None else dataclasses.asdict(child_context)
+        f.write(json.dumps(context) + "\\n")
+    return {"combined_score": 0.5}
+"""
 
 
 class TestRunWorkspace(unittest.TestCase):
@@ -277,8 +306,8 @@ class TestRunEditsInPlace(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.tmp = Path(directory.name)
 
-    def run_editing(self, program: str) -> OpenEvolve:
-        """One iteration whose codex writes `program` to program.py.
+    def run_editing(self, program: str, evaluator: str = EVALUATOR) -> OpenEvolve:
+        """One iteration whose codex writes `program` to program.py, with `evaluator`.
 
         Raises:
             EvolutionFailedError: The iteration produced no child.
@@ -286,7 +315,7 @@ class TestRunEditsInPlace(unittest.TestCase):
         log, root = self.tmp / "turns.jsonl", self.tmp / "workspaces"
         root.mkdir()
         (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
-        (self.tmp / "evaluator.py").write_text(EVALUATOR)
+        (self.tmp / "evaluator.py").write_text(evaluator)
         config = Config()
         config.diff_based_evolution = False
         config.evaluator.parallel_evaluations = 1
@@ -320,6 +349,25 @@ class TestRunEditsInPlace(unittest.TestCase):
         [child] = [p for p in run.database.programs.values() if p.parent_id is not None]
         self.assertEqual(child.code, edited)
         self.assertEqual(child.metadata["evolution_mode"], "full_rewrite")
+
+    def test_evaluate_gets_the_childs_lineage_and_codexs_message(self):
+        """An evaluate() naming child_context gets the child's id, parent, island and
+        codex's final message; the initial program gets None."""
+        run = self.run_editing("def f():\n    return 1\n", CONTEXT_EVALUATOR)
+
+        log = self.tmp / "contexts.jsonl"
+        seed, child = [json.loads(line) for line in log.read_text().splitlines()]
+        [stored] = [p for p in run.database.programs.values() if p.parent_id is not None]
+        self.assertIsNone(seed)
+        self.assertEqual(
+            child,
+            {
+                "program_id": stored.id,
+                "parent_id": stored.parent_id,
+                "island": 0,
+                "llm_message": "done",
+            },
+        )
 
     def test_an_unchanged_file_fails_the_iteration(self):
         """No silent fallback: the parent is not submitted again as its own child."""

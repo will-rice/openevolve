@@ -9,9 +9,9 @@ import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
+from openevolve.config import LLMModelConfig
 from openevolve.llm.base import LLMInterface
 from openevolve.llm.openai import OpenAILLM
-from openevolve.config import LLMModelConfig
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,9 @@ class LLMEnsemble:
             logger._ensemble_logged = True
 
         self.last_usage: Optional[Dict[str, Any]] = None
+        # The sampled model's final message of the latest request, when it keeps one
+        # (codex_app_server's last_message, which with a reply_file is not the reply)
+        self.last_message: Optional[str] = None
         # Configured name of the model sampled for the latest request
         self.last_model: Optional[str] = None
         # Set by reseed(); gives each iteration's requests their own seed
@@ -109,6 +112,7 @@ class LLMEnsemble:
         model = self.models[index]
         res = await model.generate(prompt, **self._request_kwargs(index, kwargs))
         self.last_usage = getattr(model, "last_usage", None)
+        self.last_message = getattr(model, "last_message", None)
         return res
 
     async def generate_with_context(
@@ -121,6 +125,7 @@ class LLMEnsemble:
             system_message, messages, **self._request_kwargs(index, kwargs)
         )
         self.last_usage = getattr(model, "last_usage", None)
+        self.last_message = getattr(model, "last_message", None)
         return res
 
     def reseed(self, iteration: int) -> None:
