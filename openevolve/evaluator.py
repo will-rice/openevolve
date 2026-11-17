@@ -166,8 +166,10 @@ class Evaluator:
         # mirrors the actual call functools.partial(evaluate, **args)(program_path),
         # so it also rejects a configured key shadowing a positional parameter of a
         # **kwargs evaluator (TypeError: multiple values for argument).
+        # An evaluate() naming child_context gets it with every call (_direct_evaluate).
+        context = {"child_context": None} if "child_context" in signature.parameters else {}
         try:
-            signature.bind(object(), **evaluator_args)
+            signature.bind(object(), **evaluator_args, **context)
         except TypeError as e:
             raise ValueError(
                 f"Configured evaluator_args {sorted(evaluator_args.keys())} cannot be "

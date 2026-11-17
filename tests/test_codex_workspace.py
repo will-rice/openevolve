@@ -306,8 +306,11 @@ class TestRunEditsInPlace(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.tmp = Path(directory.name)
 
-    def run_editing(self, program: str, evaluator: str = EVALUATOR) -> OpenEvolve:
-        """One iteration whose codex writes `program` to program.py, with `evaluator`.
+    def run_editing(
+        self, program: str, evaluator: str = EVALUATOR, evaluator_args: dict | None = None
+    ) -> OpenEvolve:
+        """One iteration whose codex writes `program` to program.py, with `evaluator`
+        and its `evaluator_args`.
 
         Raises:
             EvolutionFailedError: The iteration produced no child.
@@ -318,6 +321,7 @@ class TestRunEditsInPlace(unittest.TestCase):
         (self.tmp / "evaluator.py").write_text(evaluator)
         config = Config()
         config.diff_based_evolution = False
+        config.evaluator.evaluator_args = evaluator_args
         config.evaluator.parallel_evaluations = 1
         config.database.num_islands = 1
         config.database.in_memory = True
@@ -368,6 +372,20 @@ class TestRunEditsInPlace(unittest.TestCase):
                 "llm_message": "done",
             },
         )
+
+    def test_evaluate_gets_its_child_context_beside_evaluator_args(self):
+        """A required child_context next to configured evaluator_args is not taken
+        for a missing argument when the args are checked at startup."""
+        evaluator = CONTEXT_EVALUATOR.replace(
+            "def evaluate(program_path, child_context):",
+            "def evaluate(program_path, label, child_context):",
+        )
+
+        self.run_editing("def f():\n    return 1\n", evaluator, {"label": "x"})
+
+        log = self.tmp / "contexts.jsonl"
+        _, child = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual(child["llm_message"], "done")
 
     def test_an_unchanged_file_fails_the_iteration(self):
         """No silent fallback: the parent is not submitted again as its own child."""
