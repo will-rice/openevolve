@@ -113,6 +113,12 @@ class LLMModelConfig:
     # as the program verbatim
     reply_file: Optional[str] = None
 
+    # Codex app-server: the thread's web search, a Codex WebSearchMode ("disabled",
+    # "cached", "indexed" or "live"), sent as the thread's config override
+    # (ThreadStartParams.config's web_search); Codex's own default when unset. The
+    # search runs as the model's tool on the provider's side, not in the sandbox
+    web_search: Optional[str] = None
+
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None

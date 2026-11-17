@@ -194,6 +194,7 @@ def _make_cfg(**overrides):
         "sandbox_mode": None,
         "workspace_root": None,
         "reply_file": None,
+        "web_search": None,
         "init_client": None,
         "provider": None,
     }
@@ -318,6 +319,20 @@ class TestGenerationProtocol(unittest.TestCase):
         # {"mode": ..., "networkAccess": ...} map; current app-server
         # versions reject the map form with error -32600.
         self.assertEqual(params["sandbox"], "read-only")
+
+    def test_no_thread_config_when_web_search_unset(self):
+        _, fake, _ = run_generate()
+        params = next(p for m, p in fake.requests if m == "thread/start")
+        self.assertNotIn("config", params)
+
+    def test_web_search_is_the_thread_config_override(self):
+        _, fake, _ = run_generate(cfg_overrides={"web_search": "live"})
+        params = next(p for m, p in fake.requests if m == "thread/start")
+        self.assertEqual(params["config"], {"web_search": "live"})
+
+    def test_an_unknown_web_search_mode_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "web_search"):
+            CodexAppServerLLM(_make_cfg(web_search="always"))
 
     def test_turn_input_and_effort(self):
         _, fake, _ = run_generate(

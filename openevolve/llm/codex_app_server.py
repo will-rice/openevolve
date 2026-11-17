@@ -79,6 +79,8 @@ VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 
 # ThreadStartParams.sandbox: the app-server's SandboxMode string enum.
 VALID_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
+# ThreadStartParams.config.web_search: the app-server's WebSearchMode string enum.
+VALID_WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
@@ -269,6 +271,12 @@ class CodexAppServerLLM(LLMInterface):
         self.sandbox_mode = _cfg_value(model_cfg, "sandbox_mode", "read-only")
         self.workspace_root = getattr(model_cfg, "workspace_root", None)
         self.reply_file = getattr(model_cfg, "reply_file", None)
+        self.web_search = getattr(model_cfg, "web_search", None)
+        if self.web_search is not None and self.web_search not in VALID_WEB_SEARCH_MODES:
+            raise ValueError(
+                f"Invalid web_search: {self.web_search}. "
+                f"Expected one of {', '.join(VALID_WEB_SEARCH_MODES)}"
+            )
         if self.sandbox_mode not in VALID_SANDBOX_MODES:
             raise ValueError(
                 f"Invalid sandbox_mode: {self.sandbox_mode}. "
@@ -416,6 +424,8 @@ class CodexAppServerLLM(LLMInterface):
             }
             if cwd is not None:
                 thread_params["cwd"] = cwd
+            if self.web_search is not None:
+                thread_params["config"] = {"web_search": self.web_search}
             thread_result = session.request("thread/start", thread_params, deadline)
             thread_id = (thread_result or {}).get("thread", {}).get("id")
             if not thread_id:
