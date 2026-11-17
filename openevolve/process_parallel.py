@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.selection import IslandSelectionContext, IslandSelector, IslandState
+from openevolve.utils.logging_utils import console_handler
 from openevolve.utils.metrics_utils import safe_numeric_average
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,15 @@ def _worker_init(config_dict: dict, evaluation_file: str, parent_env: dict = Non
         },
     )
     _worker_evaluation_file = evaluation_file
+
+    # A spawned worker (max_tasks_per_child, or the spawn start method) starts with
+    # no logging set up, so its INFO records (e.g. each codex turn's web searches)
+    # would be dropped at the root's default WARNING level; it logs to the console
+    # as the controller does. A forked worker inherits the controller's handlers.
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        root_logger.setLevel(getattr(logging, _worker_config.log_level))
+        root_logger.addHandler(console_handler(_worker_config.logger_prefix))
 
     # These will be lazily initialized on first use
     _worker_evaluator = None

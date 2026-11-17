@@ -23,7 +23,7 @@ from openevolve.prompt.sampler import PromptSampler
 from openevolve.selection import IslandSelector
 from openevolve.utils.code_utils import extract_code_language
 from openevolve.utils.format_utils import format_improvement_safe, format_metrics_safe
-from openevolve.utils.logging_utils import LoggerPrefixFilter
+from openevolve.utils.logging_utils import LoggerPrefixFilter, console_handler
 
 logger = logging.getLogger(__name__)
 
@@ -226,15 +226,7 @@ class OpenEvolve:
         root_logger.addHandler(file_handler)
 
         # Add console handler
-        console_handler = logging.StreamHandler()
-        console_format = "%(asctime)s - %(levelname)s - %(message)s"
-        if prefix_filter is not None:
-            # Include the (prefixed) logger name so console output is
-            # distinguishable across runs as well; default format is unchanged.
-            console_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-            console_handler.addFilter(prefix_filter)
-        console_handler.setFormatter(logging.Formatter(console_format))
-        root_logger.addHandler(console_handler)
+        root_logger.addHandler(console_handler(self.config.logger_prefix))
 
         logger.info(f"Logging to {log_file}")
 

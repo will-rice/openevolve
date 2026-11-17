@@ -32,3 +32,21 @@ class LoggerPrefixFilter(logging.Filter):
         if self.prefix and not record.name.startswith(self.prefix + "."):
             record.name = f"{self.prefix}.{record.name}"
         return True
+
+
+def console_handler(logger_prefix: Optional[str]) -> logging.Handler:
+    """The console (stderr) handler of an OpenEvolve run's processes.
+
+    The format names the logger (with ``logger_prefix``, through
+    :class:`LoggerPrefixFilter`) only when a prefix is set; the default format is
+    unchanged otherwise.
+    """
+    handler = logging.StreamHandler()
+    console_format = "%(asctime)s - %(levelname)s - %(message)s"
+    if logger_prefix:
+        # Include the (prefixed) logger name so console output is
+        # distinguishable across runs as well.
+        console_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        handler.addFilter(LoggerPrefixFilter(logger_prefix))
+    handler.setFormatter(logging.Formatter(console_format))
+    return handler
