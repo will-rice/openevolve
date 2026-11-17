@@ -467,6 +467,9 @@ class CodexAppServerLLM(LLMInterface):
         (`item.type == "agentMessage"`); `turn/completed` closes the turn.
         """
         text: Optional[str] = None
+        # The queries of the turn's web searches (WebSearchThreadItem.query), logged
+        # when it completes so a caller can see whether and how the model searched.
+        searches: List[str] = []
         while True:
             message = session.next_message(deadline)
             if message.get("id") is not None:
@@ -477,10 +480,13 @@ class CodexAppServerLLM(LLMInterface):
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage":
                     text = item.get("text") or ""
+                elif item.get("type") == "webSearch":
+                    searches.append(item["query"])
             elif method == "turn/completed":
                 status = (params.get("turn") or {}).get("status")
                 if status and status != "completed":
                     raise RuntimeError(f"codex app-server turn did not complete: {status}")
+                logger.info(f"Codex turn completed with {len(searches)} web searches: {searches}")
                 break
             elif method == "error":
                 # ErrorNotification: a TurnError and whether codex retries the turn
