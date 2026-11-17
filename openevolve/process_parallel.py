@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
+from openevolve.injection import ChildInjector, InjectedChild
 from openevolve.selection import IslandSelectionContext, IslandSelector, IslandState
 from openevolve.utils.logging_utils import console_handler
 from openevolve.utils.metrics_utils import safe_numeric_average
@@ -83,6 +84,8 @@ class SerializableResult:
 
 EVOLUTION_MODE_DIFF = "diff"
 EVOLUTION_MODE_FULL_REWRITE = "full_rewrite"
+# An iteration whose child a ChildInjector handed in (openevolve.injection)
+EVOLUTION_MODE_INJECTED = "injected"
 
 
 def _choose_evolution_mode(config: Config, iteration: int) -> str:
@@ -221,9 +224,20 @@ def _lazy_init_worker_components():
 
 
 def _run_iteration_worker(
-    iteration: int, db_snapshot: Dict[str, Any], parent_id: str, inspiration_ids: List[str]
+    iteration: int,
+    db_snapshot: Dict[str, Any],
+    parent_id: str,
+    inspiration_ids: List[str],
+    injected: Optional[Dict[str, Any]] = None,
 ) -> SerializableResult:
-    """Run a single iteration in a worker process"""
+    """Run a single iteration in a worker process
+
+    With `injected` (an InjectedChild as a dict), the iteration's child is that
+    program: no prompt and no generation (openevolve.injection)."""
+    if injected is not None:
+        result = _run_injected(iteration, db_snapshot, parent_id, injected)
+        result.evolution_mode = EVOLUTION_MODE_INJECTED
+        return result
     try:
         evolution_mode = _choose_evolution_mode(_worker_config, iteration)
     except Exception as e:
@@ -453,38 +467,13 @@ def _run_iteration(
                 error=f"Generated code exceeds maximum length ({len(child_code)} > {_worker_config.max_code_length})"
             )
 
-        # Get target island from snapshot (where child should be placed)
-        target_island = db_snapshot.get("sampling_island")
-
-        # Evaluate the child program
-        import uuid
-
-        from openevolve.evaluation_result import ChildContext
-
-        child_id = str(uuid.uuid4())
-        child_context = ChildContext(
-            program_id=child_id,
-            parent_id=parent.id,
-            island=target_island,
-            llm_message=llm_message,
-        )
-        child_metrics = _run_worker_async(
-            _worker_evaluator.evaluate_program(child_code, child_id, child_context)
-        )
-
-        # Get artifacts
-        artifacts = _worker_evaluator.get_pending_artifacts(child_id)
-
-        # Create child program
-        child_program = Program(
-            id=child_id,
-            code=child_code,
-            changes_description=child_changes_desc,
-            language=_worker_config.language,
-            parent_id=parent.id,
-            generation=parent.generation + 1,
-            metrics=child_metrics,
-            iteration_found=iteration,
+        return _evaluate_child(
+            iteration,
+            db_snapshot,
+            parent,
+            child_code,
+            child_changes_desc,
+            iteration_start,
             metadata={
                 "changes": changes_summary,
                 "parent_metrics": parent.metrics,
@@ -493,22 +482,122 @@ def _run_iteration(
                 "evolution_mode": evolution_mode,
                 "llm_model": getattr(_worker_llm_ensemble, "last_model", None),
             },
-        )
-
-        iteration_time = time.time() - iteration_start
-
-        return SerializableResult(
-            child_program_dict=child_program.to_dict(),
-            parent_id=parent.id,
-            iteration_time=iteration_time,
+            llm_message=llm_message,
+            injected=None,
             prompt=prompt,
             llm_response=llm_response,
-            artifacts=artifacts,
-            iteration=iteration,
-            target_island=target_island,
             token_usage=token_usage,
         )
 
+    except Exception as e:
+        logger.exception(f"Error in worker iteration {iteration}")
+        return SerializableResult(error=str(e), iteration=iteration)
+
+
+def _evaluate_child(
+    iteration: int,
+    db_snapshot: Dict[str, Any],
+    parent: Program,
+    child_code: str,
+    child_changes_desc: Optional[str],
+    iteration_start: float,
+    metadata: Dict[str, Any],
+    llm_message: Optional[str],
+    injected: Optional[str],
+    prompt: Optional[Dict[str, str]],
+    llm_response: Optional[str],
+    token_usage: Optional[Dict[str, Any]],
+) -> SerializableResult:
+    """Evaluate an iteration's child and package it for the controller: a generated
+    child's and an injected one's (openevolve.injection) last steps alike."""
+    # Get target island from snapshot (where child should be placed)
+    target_island = db_snapshot.get("sampling_island")
+
+    # Evaluate the child program
+    import uuid
+
+    from openevolve.evaluation_result import ChildContext
+
+    child_id = str(uuid.uuid4())
+    child_context = ChildContext(
+        program_id=child_id,
+        parent_id=parent.id,
+        island=target_island,
+        llm_message=llm_message,
+        injected=injected,
+    )
+    child_metrics = _run_worker_async(
+        _worker_evaluator.evaluate_program(child_code, child_id, child_context)
+    )
+
+    # Get artifacts
+    artifacts = _worker_evaluator.get_pending_artifacts(child_id)
+
+    # Create child program
+    child_program = Program(
+        id=child_id,
+        code=child_code,
+        changes_description=child_changes_desc,
+        language=_worker_config.language,
+        parent_id=parent.id,
+        generation=parent.generation + 1,
+        metrics=child_metrics,
+        iteration_found=iteration,
+        metadata=metadata,
+    )
+
+    iteration_time = time.time() - iteration_start
+
+    return SerializableResult(
+        child_program_dict=child_program.to_dict(),
+        parent_id=parent.id,
+        iteration_time=iteration_time,
+        prompt=prompt,
+        llm_response=llm_response,
+        artifacts=artifacts,
+        iteration=iteration,
+        target_island=target_island,
+        token_usage=token_usage,
+    )
+
+
+def _run_injected(
+    iteration: int, db_snapshot: Dict[str, Any], parent_id: str, injected: Dict[str, Any]
+) -> SerializableResult:
+    """An iteration whose child is a program a ChildInjector handed in: no prompt and
+    no generation; evaluated and packaged as a generated child is."""
+    try:
+        _lazy_init_worker_components()
+        parent = Program(**db_snapshot["programs"][parent_id])
+        code = injected["code"]
+        if len(code) > _worker_config.max_code_length:
+            return SerializableResult(
+                error=f"Injected code exceeds maximum length ({len(code)} > "
+                f"{_worker_config.max_code_length})",
+                iteration=iteration,
+                parent_id=parent.id,
+                target_island=db_snapshot.get("sampling_island"),
+            )
+        return _evaluate_child(
+            iteration,
+            db_snapshot,
+            parent,
+            code,
+            None,
+            time.time(),
+            metadata={
+                "changes": f"injected: {injected['label']}",
+                "parent_metrics": parent.metrics,
+                "island": db_snapshot.get("sampling_island"),
+                "evolution_mode": EVOLUTION_MODE_INJECTED,
+                "injected": injected["label"],
+            },
+            llm_message=None,
+            injected=injected["label"],
+            prompt=None,
+            llm_response=None,
+            token_usage=None,
+        )
     except Exception as e:
         logger.exception(f"Error in worker iteration {iteration}")
         return SerializableResult(error=str(e), iteration=iteration)
@@ -580,6 +669,7 @@ class ProcessParallelController:
         evolution_tracer=None,
         file_suffix: str = ".py",
         island_selector: Optional[IslandSelector] = None,
+        child_injector: Optional[ChildInjector] = None,
     ):
         self.config = config
         self.evaluation_file = evaluation_file
@@ -587,6 +677,9 @@ class ProcessParallelController:
         self.evolution_tracer = evolution_tracer
         self.file_suffix = file_suffix
         self.island_selector = island_selector
+        self.child_injector = child_injector
+        # The injected child of each iteration in flight (openevolve.injection)
+        self._injected: Dict[int, InjectedChild] = {}
 
         self.executor: Optional[ProcessPoolExecutor] = None
         self.shutdown_event = mp.Event()
@@ -860,6 +953,7 @@ class ProcessParallelController:
 
             # Process completed result
             future = pending_futures.pop(completed_iteration)
+            admitted = False
 
             try:
                 # Use evaluator timeout + buffer to gracefully handle stuck processes
@@ -911,6 +1005,7 @@ class ProcessParallelController:
                     )
                     if admitted_id is None:
                         raise _CandidateRejected(child_program.id)
+                    admitted = True
 
                     # Store artifacts
                     if result.artifacts:
@@ -1150,6 +1245,10 @@ class ProcessParallelController:
                         iteration=completed_iteration, error=self.last_iteration_error
                     )
 
+            injected = self._injected.pop(completed_iteration, None)
+            if injected is not None:
+                self.child_injector.done(injected, admitted)
+
             completed_iterations += 1
 
             # Remove completed iteration from island tracking
@@ -1223,10 +1322,25 @@ class ProcessParallelController:
     def _submit_iteration(
         self, iteration: int, island_id: Optional[int] = None
     ) -> Optional[Future]:
-        """Submit an iteration to the process pool, optionally pinned to a specific island"""
+        """Submit an iteration to the process pool, optionally pinned to a specific island
+
+        A child_injector's waiting program (openevolve.injection) makes the iteration's
+        child, on the island the injector names."""
+        injected = self.child_injector.take(iteration) if self.child_injector else None
+        if injected is not None and (
+            isinstance(injected.island, bool)
+            or not isinstance(injected.island, Integral)
+            or not 0 <= injected.island < self.num_islands
+        ):
+            raise ValueError(
+                f"child_injector must name an island in [0, {self.num_islands - 1}], "
+                f"got {injected.island!r}"
+            )
         try:
             # Use specified island or current island
             target_island = island_id if island_id is not None else self.database.current_island
+            if injected is not None:
+                target_island = int(injected.island)
 
             # Use thread-safe sampling that doesn't modify shared state
             # This fixes the race condition from GitHub issue #246
@@ -1249,10 +1363,20 @@ class ProcessParallelController:
                 db_snapshot,
                 parent.id,
                 [insp.id for insp in inspirations],
+                # Only when there is one, so a generated iteration's call is as before
+                *(() if injected is None else (asdict(injected),)),
             )
+            if injected is not None:
+                logger.info(
+                    f"Iteration {iteration}: injected {injected.label} on island "
+                    f"{target_island}"
+                )
+                self._injected[iteration] = injected
 
             return future
 
         except Exception as e:
             logger.error(f"Error submitting iteration {iteration}: {e}")
+            if injected is not None:
+                self.child_injector.done(injected, False)
             return None

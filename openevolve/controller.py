@@ -18,6 +18,7 @@ from openevolve.evaluator import Evaluator
 from openevolve.evolution_trace import EvolutionTracer
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.population import PopulationStrategy
+from openevolve.injection import ChildInjector
 from openevolve.process_parallel import ProcessParallelController
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.selection import IslandSelector
@@ -55,10 +56,14 @@ class OpenEvolve:
         output_dir: Optional[str] = None,
         island_selector: Optional[IslandSelector] = None,
         population_strategy: Optional[PopulationStrategy] = None,
+        child_injector: Optional[ChildInjector] = None,
     ):
         # Load configuration (loaded in main_async)
         self.config = config
         self.island_selector = island_selector
+        # Programs made outside the loop, taken in place of generations
+        # (openevolve.injection)
+        self.child_injector = child_injector
         # A Config built in code never passes through Config.from_dict, so validate here too
         self.config.validate_evolution_mode()
 
@@ -377,6 +382,7 @@ class OpenEvolve:
                 self.evolution_tracer,
                 file_suffix=self.config.file_suffix,
                 island_selector=self.island_selector,
+                child_injector=self.child_injector,
             )
 
             # Set up signal handlers for graceful shutdown

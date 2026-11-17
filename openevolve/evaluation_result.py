@@ -77,9 +77,12 @@ class ChildContext:
         llm_message: The model's final message of the iteration's generation, or None
             when its backend keeps none (only codex_app_server does). With a
             `reply_file` it is not the reply: the model can say there what it changed.
+        injected: The label of a program a ChildInjector handed the iteration in
+            place of a generation (openevolve.injection), or None.
     """
 
     program_id: str
     parent_id: str
     island: int
     llm_message: Optional[str]
+    injected: Optional[str] = None

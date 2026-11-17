@@ -370,6 +370,7 @@ class TestRunEditsInPlace(unittest.TestCase):
                 "parent_id": stored.parent_id,
                 "island": 0,
                 "llm_message": "done",
+                "injected": None,
             },
         )
 
