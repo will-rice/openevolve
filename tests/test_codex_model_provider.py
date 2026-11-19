@@ -8,6 +8,11 @@ app-server sent (2026-11-19) for a turn on a custom provider whose base_url refu
 connections: an ErrorNotification with willRetry true, after which codex goes on
 reconnecting and sends nothing more. codex_retried_turn.jsonl is that notification
 followed by the end of a real completed turn (codex_web_search_turn.jsonl's).
+codex_refused_bounded_turn.jsonl and codex_silent_stream_turn.jsonl are real turns
+(2026-11-19) with the thread's features.unbounded_connection_retries false and the
+provider's stream_max_retries 1: on a server that refuses connections, and on one
+that answers and then sends nothing (stream_idle_timeout_ms 3000). Each is a
+retried notice, then codex's own non-retryable error and a failed turn/completed.
 """
 
 import asyncio
@@ -26,6 +31,8 @@ from test_codex_app_server_llm import _make_cfg, run_generate
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
 UNREACHABLE_TURN = Path(__file__).parent / "codex_unreachable_provider_turn.jsonl"
 RETRIED_TURN = Path(__file__).parent / "codex_retried_turn.jsonl"
+REFUSED_BOUNDED_TURN = Path(__file__).parent / "codex_refused_bounded_turn.jsonl"
+SILENT_STREAM_TURN = Path(__file__).parent / "codex_silent_stream_turn.jsonl"
 
 LOCAL = {"base_url": "http://127.0.0.1:8000/v1", "wire_api": "responses", "name": "local"}
 
@@ -139,6 +146,22 @@ class TestRetriedErrors(unittest.TestCase):
             with self.assertRaises(asyncio.TimeoutError):
                 asyncio.run(llm.generate("p"))
         self.assertIsNone(llm.last_backend)
+
+
+class TestCodexEndsAStalledTurn(unittest.TestCase):
+    def test_codex_ends_a_turn_on_a_refused_server_after_its_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            llm = local_llm(Path(directory) / "turns.jsonl", REFUSED_BOUNDED_TURN, 30)
+
+            with self.assertRaisesRegex(RuntimeError, "httpConnectionFailed"):
+                asyncio.run(llm.generate("p"))
+
+    def test_codex_ends_a_turn_on_a_silent_stream_after_its_retries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            llm = local_llm(Path(directory) / "turns.jsonl", SILENT_STREAM_TURN, 30)
+
+            with self.assertRaisesRegex(RuntimeError, "idle timeout waiting for SSE"):
+                asyncio.run(llm.generate("p"))
 
 
 if __name__ == "__main__":

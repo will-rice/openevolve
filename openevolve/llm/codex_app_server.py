@@ -62,9 +62,15 @@ Notes:
   line names it too.
 - With `idle_timeout`, a turn fails only once no notification that it progresses
   (PROGRESS_METHODS) has come for that many seconds, so a slow model that keeps
-  working is never cut off, and a hung server is. `timeout` then bounds only the
-  turn's start (the handshake through turn/start), and `turn_timeout`, when set,
-  the whole turn. Without it, `timeout` bounds the whole call, as before.
+  working is never cut off, and a hung app-server is. codex ends a turn whose model
+  stream stalls by itself, after the provider's stream_idle_timeout_ms and
+  stream_max_retries (codex-rs/core/src/responses_retry.rs:120-171, rust-v0.161.0),
+  and one on a server that refuses connections when the thread's
+  features.unbounded_connection_retries is false (responses_retry.rs:91-114), so
+  idle_timeout is a safety above those, for what codex cannot see. `timeout` then
+  bounds only the turn's start (the handshake through turn/start), and
+  `turn_timeout`, when set, the whole turn. Without it, `timeout` bounds the whole
+  call, as before.
 - A turn that ends on the account's usage limit (the app-server's `error`
   notification with `codexErrorInfo` "usageLimitExceeded") raises
   CodexUsageLimitError at once, never retried: another call only meets the same
