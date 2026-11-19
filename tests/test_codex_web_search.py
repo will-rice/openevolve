@@ -42,7 +42,8 @@ class TestWebSearch(unittest.TestCase):
 
         self.assertEqual(reply, "[GPT‑6.2 Astra and Sol](https://news.ycombinator.com/)")
         self.assertIn(
-            "Codex turn completed with 1 web searches: ['https://news.ycombinator.com/']",
+            "Codex turn on openai/gpt-test completed with 1 web searches: "
+            "['https://news.ycombinator.com/']",
             logs.output[-1],
         )
 

@@ -112,6 +112,7 @@ class TestChildInjection(unittest.TestCase):
                 "island": 1,
                 "llm_message": None,
                 "injected": "session-7",
+                "llm_backend": None,
             },
         )
         self.assertFalse((self.tmp / "turns.jsonl").exists())

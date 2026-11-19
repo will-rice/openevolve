@@ -356,6 +356,7 @@ def _run_iteration(
             )
             token_usage = getattr(_worker_llm_ensemble, "last_usage", None)
             llm_message = _worker_llm_ensemble.last_message
+            llm_backend = _worker_llm_ensemble.last_backend
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             return _reject(error=f"LLM generation failed: {str(e)}")
@@ -483,6 +484,7 @@ def _run_iteration(
                 "llm_model": getattr(_worker_llm_ensemble, "last_model", None),
             },
             llm_message=llm_message,
+            llm_backend=llm_backend,
             injected=None,
             prompt=prompt,
             llm_response=llm_response,
@@ -503,6 +505,7 @@ def _evaluate_child(
     iteration_start: float,
     metadata: Dict[str, Any],
     llm_message: Optional[str],
+    llm_backend: Optional[str],
     injected: Optional[str],
     prompt: Optional[Dict[str, str]],
     llm_response: Optional[str],
@@ -524,6 +527,7 @@ def _evaluate_child(
         parent_id=parent.id,
         island=target_island,
         llm_message=llm_message,
+        llm_backend=llm_backend,
         injected=injected,
     )
     child_metrics = _run_worker_async(
@@ -593,6 +597,7 @@ def _run_injected(
                 "injected": injected["label"],
             },
             llm_message=None,
+            llm_backend=None,
             injected=injected["label"],
             prompt=None,
             llm_response=None,

@@ -1,11 +1,13 @@
 """The codex_app_server backend on a model provider other than OpenAI's.
 
 The thread-parameter and auth tests drive the in-process fake app-server of
-test_codex_app_server_llm. The unreachable-provider test starts a real process:
-`codex_command` runs tests/fake_codex_app_server.py, which ends the turn with
-codex_unreachable_provider_turn.jsonl, the ErrorNotification codex 0.161.0's
-app-server sent (2026-11-19) for a turn on a custom provider whose base_url
-refused connections; codex itself goes on reconnecting (willRetry true).
+test_codex_app_server_llm. The retry tests start a real process: `codex_command`
+runs tests/fake_codex_app_server.py, which answers the turn with recorded
+notifications. codex_unreachable_provider_turn.jsonl is what codex 0.161.0's
+app-server sent (2026-11-19) for a turn on a custom provider whose base_url refused
+connections: an ErrorNotification with willRetry true, after which codex goes on
+reconnecting and sends nothing more. codex_retried_turn.jsonl is that notification
+followed by the end of a real completed turn (codex_web_search_turn.jsonl's).
 """
 
 import asyncio
@@ -18,12 +20,12 @@ from openevolve.config import LLMModelConfig
 from openevolve.llm.codex_app_server import (
     CodexAppServerLLM,
     CodexAuthError,
-    CodexUsageLimitError,
 )
 from test_codex_app_server_llm import _make_cfg, run_generate
 
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
 UNREACHABLE_TURN = Path(__file__).parent / "codex_unreachable_provider_turn.jsonl"
+RETRIED_TURN = Path(__file__).parent / "codex_retried_turn.jsonl"
 
 LOCAL = {"base_url": "http://127.0.0.1:8000/v1", "wire_api": "responses", "name": "local"}
 
@@ -100,30 +102,43 @@ class TestRefusedProviders(unittest.TestCase):
         self.assert_refused("context_window", context_window=0)
 
 
-class TestUnreachableProvider(unittest.TestCase):
-    def test_a_connection_error_fails_the_call_and_is_not_a_usage_limit(self):
-        """codex's reconnect notice fails the turn, retried as any other failure."""
+def local_llm(log, turn, timeout):
+    """A custom-provider model whose app-server answers each turn with `turn`."""
+    command = [sys.executable, str(FAKE), str(log), "0", str(turn)]
+    return CodexAppServerLLM(
+        LLMModelConfig(
+            name="local-model",
+            timeout=timeout,
+            retries=0,
+            retry_delay=0,
+            codex_command=command,
+            model_provider={"local": LOCAL},
+            web_search="disabled",
+        )
+    )
+
+
+class TestRetriedErrors(unittest.TestCase):
+    def test_a_retried_error_does_not_end_the_turn(self):
+        """willRetry: codex retries itself; the turn's reply is its final message."""
         with tempfile.TemporaryDirectory() as directory:
-            log = Path(directory) / "turns.jsonl"
-            command = [sys.executable, str(FAKE), str(log), "0", str(UNREACHABLE_TURN)]
-            llm = CodexAppServerLLM(
-                LLMModelConfig(
-                    name="local-model",
-                    timeout=30,
-                    retries=1,
-                    retry_delay=0,
-                    codex_command=command,
-                    model_provider={"local": LOCAL},
-                    web_search="disabled",
-                )
-            )
+            llm = local_llm(Path(directory) / "turns.jsonl", RETRIED_TURN, 30)
 
-            with self.assertRaises(RuntimeError) as raised:
+            with self.assertLogs("openevolve.llm.codex_app_server", "WARNING") as logs:
+                reply = asyncio.run(llm.generate("p"))
+
+        self.assertEqual(reply, "[GPT\u20116.2 Astra and Sol](https://news.ycombinator.com/)")
+        self.assertEqual(llm.last_backend, "local/local-model")
+        self.assertIn("responseStreamDisconnected", logs.output[0])
+
+    def test_an_unreachable_provider_runs_to_the_calls_timeout(self):
+        """codex reconnects without end; the call ends at its timeout, not a usage limit."""
+        with tempfile.TemporaryDirectory() as directory:
+            llm = local_llm(Path(directory) / "turns.jsonl", UNREACHABLE_TURN, 2)
+
+            with self.assertRaises(asyncio.TimeoutError):
                 asyncio.run(llm.generate("p"))
-
-            self.assertEqual(len(log.read_text().splitlines()), 2)
-        self.assertNotIsInstance(raised.exception, CodexUsageLimitError)
-        self.assertIn("responseStreamDisconnected", str(raised.exception))
+        self.assertIsNone(llm.last_backend)
 
 
 if __name__ == "__main__":

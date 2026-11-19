@@ -371,6 +371,7 @@ class TestRunEditsInPlace(unittest.TestCase):
                 "island": 0,
                 "llm_message": "done",
                 "injected": None,
+                "llm_backend": "openai/gpt-test",
             },
         )
 

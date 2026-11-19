@@ -52,6 +52,14 @@ Notes:
   program verbatim). Only a turn that completed is read; a file that is gone, is not
   UTF-8 or holds a code fence (which the full-rewrite path would cut) raises
   CodexReplyFileError, never retried: another turn starts over from the parent.
+- An `error` notification with `willRetry` true is a transient error codex retries
+  itself, which does not interrupt the turn (ErrorNotification.will_retry,
+  codex-rs/app-server-protocol/src/protocol/v2/notification.rs:64-66,
+  rust-v0.161.0): it is logged and the turn goes on, to its end or the call's
+  timeout. Any other `error` notification fails the call.
+- `last_backend` names the backend of the latest turn that completed,
+  "<provider id>/<model>" ("openai/<model>" on OpenAI's provider); the per-turn log
+  line names it too.
 - A turn that ends on the account's usage limit (the app-server's `error`
   notification with `codexErrorInfo` "usageLimitExceeded") raises
   CodexUsageLimitError at once, never retried: another call only meets the same
@@ -315,6 +323,8 @@ class CodexAppServerLLM(LLMInterface):
         # with reply_file, beside it; the evolution loop reads it from the ensemble
         # (LLMEnsemble.last_message) for the evaluator (ChildContext.llm_message).
         self.last_message: Optional[str] = None
+        # "<provider id>/<model>" of the latest turn that completed (`backend`).
+        self.last_backend: Optional[str] = None
         if self.web_search is not None and self.web_search not in VALID_WEB_SEARCH_MODES:
             raise ValueError(
                 f"Invalid web_search: {self.web_search}. "
@@ -344,6 +354,14 @@ class CodexAppServerLLM(LLMInterface):
                 f"Expected one of {', '.join(VALID_REASONING_EFFORTS)}"
             )
         logger.info(f"Initialized CodexAppServerLLM with model: {self.model}")
+
+    @property
+    def backend(self) -> str:
+        """The backend this provider's turns run on: "<provider id>/<model>"."""
+        if self.model_provider is None:
+            return f"{OPENAI_PROVIDER_ID}/{self.model}"
+        ((provider_id, _),) = self.model_provider.items()
+        return f"{provider_id}/{self.model}"
 
     def _check_model_provider(self) -> None:
         """Raise ValueError unless model_provider is one custom provider codex runs."""
@@ -446,8 +464,10 @@ class CodexAppServerLLM(LLMInterface):
     def _run_app_server(self, prompt: str, timeout: int, files: Dict[str, str]) -> str:
         """Run one turn, in a fresh workspace holding `files` when one is configured."""
         self.last_message = None
+        self.last_backend = None
         if self.workspace_root is None:
             self.last_message = self._run_turn(prompt, timeout, None)
+            self.last_backend = self.backend
             return self.last_message
         with tempfile.TemporaryDirectory(dir=self.workspace_root) as workspace:
             for name, text in files.items():
@@ -458,6 +478,7 @@ class CodexAppServerLLM(LLMInterface):
             # first, so a half-edited reply_file is never read.
             message = self._run_turn(prompt, timeout, workspace)
             self.last_message = message
+            self.last_backend = self.backend
             if self.reply_file is None:
                 return message
             return self._read_reply_file(os.path.join(workspace, self.reply_file))
@@ -575,12 +596,18 @@ class CodexAppServerLLM(LLMInterface):
                 status = (params.get("turn") or {}).get("status")
                 if status and status != "completed":
                     raise RuntimeError(f"codex app-server turn did not complete: {status}")
-                logger.info(f"Codex turn completed with {len(searches)} web searches: {searches}")
+                logger.info(
+                    f"Codex turn on {self.backend} completed with {len(searches)} web "
+                    f"searches: {searches}"
+                )
                 break
             elif method == "error":
                 # ErrorNotification: a TurnError and whether codex retries the turn
                 # itself (codex-rs/app-server-protocol/src/protocol/v2/notification.rs:62-69).
                 error = params["error"]
+                if params["willRetry"]:
+                    logger.warning(f"codex retries after a transient error: {error}")
+                    continue
                 if error.get("codexErrorInfo") == USAGE_LIMIT_EXCEEDED:
                     raise CodexUsageLimitError(error["message"])
                 raise RuntimeError(f"codex app-server reported an error: {params}")

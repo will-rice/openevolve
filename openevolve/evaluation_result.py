@@ -79,6 +79,9 @@ class ChildContext:
             `reply_file` it is not the reply: the model can say there what it changed.
         injected: The label of a program a ChildInjector handed the iteration in
             place of a generation (openevolve.injection), or None.
+        llm_backend: The backend that served the iteration's generation, as its model
+            names it (codex_app_server's last_backend: "<provider id>/<model>"), or
+            None when its backend names none.
     """
 
     program_id: str
@@ -86,3 +89,4 @@ class ChildContext:
     island: int
     llm_message: Optional[str]
     injected: Optional[str] = None
+    llm_backend: Optional[str] = None

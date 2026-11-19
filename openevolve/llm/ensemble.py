@@ -101,6 +101,9 @@ class LLMEnsemble:
         # The sampled model's final message of the latest request, when it keeps one
         # (codex_app_server's last_message, which with a reply_file is not the reply)
         self.last_message: Optional[str] = None
+        # The backend that served the latest request, when the sampled model names it
+        # (codex_app_server's last_backend)
+        self.last_backend: Optional[str] = None
         # Configured name of the model sampled for the latest request
         self.last_model: Optional[str] = None
         # Set by reseed(); gives each iteration's requests their own seed
@@ -113,6 +116,7 @@ class LLMEnsemble:
         res = await model.generate(prompt, **self._request_kwargs(index, kwargs))
         self.last_usage = getattr(model, "last_usage", None)
         self.last_message = getattr(model, "last_message", None)
+        self.last_backend = getattr(model, "last_backend", None)
         return res
 
     async def generate_with_context(
@@ -126,6 +130,7 @@ class LLMEnsemble:
         )
         self.last_usage = getattr(model, "last_usage", None)
         self.last_message = getattr(model, "last_message", None)
+        self.last_backend = getattr(model, "last_backend", None)
         return res
 
     def reseed(self, iteration: int) -> None:
