@@ -197,6 +197,8 @@ def _make_cfg(**overrides):
         "web_search": None,
         "model_provider": None,
         "context_window": None,
+        "idle_timeout": None,
+        "turn_timeout": None,
         "init_client": None,
         "provider": None,
     }

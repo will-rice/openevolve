@@ -8,8 +8,9 @@ and appends one JSON line per turn to <log>: its process cwd, the thread's cwd a
 sandbox, the turn's prompt, and the files of the thread's cwd, if it has one, with
 their text. It sleeps <sleep> seconds
 before answering a turn, and answers it with <reply>; a <reply> naming a .jsonl file
-instead ends the turn with that file's notifications, a recorded failure
-(codex_usage_limit_turn.jsonl). With <program>, each turn first writes it to
+instead answers turn/start at once, then ends the turn with that file's
+notifications, a recorded turn (codex_usage_limit_turn.jsonl), <sleep> seconds
+before each: a slow turn that keeps progressing. With <program>, each turn first writes it to
 program.py in the thread's cwd, as a model editing the program in place does, or
 deletes program.py when <program> is "-"; the turn's log records the files before.
 """
@@ -53,7 +54,8 @@ for line in sys.stdin:
             else:
                 with open(target, "w", encoding="utf-8", newline="") as f:
                     f.write(program)
-        time.sleep(sleep)
+        if not reply.endswith(".jsonl"):
+            time.sleep(sleep)
         record = {
             "process_cwd": os.getcwd(),
             "thread_cwd": thread.get("cwd"),
@@ -67,6 +69,7 @@ for line in sys.stdin:
         if reply.endswith(".jsonl"):
             with open(reply, encoding="utf-8") as recorded:
                 for message in recorded:
+                    time.sleep(sleep)
                     send(json.loads(message))
             continue
         item = {"id": "item-1", "type": "agentMessage", "text": reply}

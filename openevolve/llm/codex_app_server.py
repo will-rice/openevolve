@@ -60,6 +60,11 @@ Notes:
 - `last_backend` names the backend of the latest turn that completed,
   "<provider id>/<model>" ("openai/<model>" on OpenAI's provider); the per-turn log
   line names it too.
+- With `idle_timeout`, a turn fails only once no notification that it progresses
+  (PROGRESS_METHODS) has come for that many seconds, so a slow model that keeps
+  working is never cut off, and a hung server is. `timeout` then bounds only the
+  turn's start (the handshake through turn/start), and `turn_timeout`, when set,
+  the whole turn. Without it, `timeout` bounds the whole call, as before.
 - A turn that ends on the account's usage limit (the app-server's `error`
   notification with `codexErrorInfo` "usageLimitExceeded") raises
   CodexUsageLimitError at once, never retried: another call only meets the same
@@ -82,6 +87,7 @@ Notes:
 import asyncio
 import json
 import logging
+import math
 import os
 import queue
 import re
@@ -122,6 +128,33 @@ PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
 # The wire APIs codex 0.161 accepts: "chat" was removed
 # (codex-rs/model-provider-info/src/lib.rs:119-131).
 VALID_WIRE_APIS = ("responses",)
+
+# The notifications that show a turn progressing, which restart its idle_timeout:
+# items starting and completing, their deltas (agent text, reasoning, plans, command
+# output, file changes, MCP tool progress), the turn's diff and plan, and token usage
+# (ServerNotification, codex-rs/app-server-protocol/src/protocol/common.rs:
+# 1958-2007, rust-v0.161.0). Not an `error` notification, even one codex retries
+# itself: a server that keeps refusing is not progress.
+PROGRESS_METHODS = frozenset(
+    (
+        "thread/tokenUsage/updated",
+        "turn/diff/updated",
+        "turn/plan/updated",
+        "item/started",
+        "item/completed",
+        "rawResponseItem/completed",
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/commandExecution/outputDelta",
+        "item/commandExecution/terminalInteraction",
+        "item/fileChange/outputDelta",
+        "item/fileChange/patchUpdated",
+        "item/mcpToolCall/progress",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/summaryPartAdded",
+        "item/reasoning/textDelta",
+    )
+)
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
@@ -315,6 +348,15 @@ class CodexAppServerLLM(LLMInterface):
         self.web_search = getattr(model_cfg, "web_search", None)
         self.model_provider = getattr(model_cfg, "model_provider", None)
         self.context_window = getattr(model_cfg, "context_window", None)
+        self.idle_timeout = getattr(model_cfg, "idle_timeout", None)
+        self.turn_timeout = getattr(model_cfg, "turn_timeout", None)
+        if self.idle_timeout is not None and self.idle_timeout <= 0:
+            raise ValueError(f"idle_timeout must be positive, not {self.idle_timeout}")
+        if self.turn_timeout is not None and (self.idle_timeout is None or self.turn_timeout <= 0):
+            raise ValueError(
+                f"turn_timeout {self.turn_timeout} needs an idle_timeout and must be "
+                "positive; without idle_timeout, timeout bounds the whole turn"
+            )
         if self.model_provider is not None:
             self._check_model_provider()
         if self.context_window is not None and self.context_window <= 0:
@@ -415,6 +457,14 @@ class CodexAppServerLLM(LLMInterface):
         retry_delay = kwargs.get("retry_delay", self.retry_delay)
         files = kwargs.get("workspace_files", {})
 
+        # The turn's thread enforces its deadlines; this bound only catches a thread
+        # that outlives them. A turn that keeps progressing has none.
+        if self.idle_timeout is None:
+            bound: Optional[float] = timeout + 30
+        elif self.turn_timeout is None:
+            bound = None
+        else:
+            bound = timeout + self.turn_timeout + 30
         loop = asyncio.get_event_loop()
         for attempt in range(retries + 1):
             try:
@@ -422,7 +472,7 @@ class CodexAppServerLLM(LLMInterface):
                     loop.run_in_executor(
                         None, lambda: self._run_app_server(prompt, timeout, files)
                     ),
-                    timeout=timeout + 30,
+                    timeout=bound,
                 )
             except FileNotFoundError:
                 logger.error(
@@ -549,6 +599,12 @@ class CodexAppServerLLM(LLMInterface):
                 turn_params["effort"] = self.reasoning_effort
             session.request("turn/start", turn_params, deadline)
 
+            if self.idle_timeout is not None:
+                # The start is done: from here only progress and the turn's own limit
+                # count (inf: none; each wait is bounded by the idle deadline).
+                deadline = time.monotonic() + (
+                    math.inf if self.turn_timeout is None else self.turn_timeout
+                )
             return self._collect_response(session, deadline)
         finally:
             session.close()
@@ -580,11 +636,25 @@ class CodexAppServerLLM(LLMInterface):
         # The queries of the turn's web searches (WebSearchThreadItem.query), logged
         # when it completes so a caller can see whether and how the model searched.
         searches: List[str] = []
+        idle_until = None if self.idle_timeout is None else time.monotonic() + self.idle_timeout
         while True:
-            message = session.next_message(deadline)
+            if idle_until is None:
+                message = session.next_message(deadline)
+            elif idle_until < deadline:
+                try:
+                    message = session.next_message(idle_until)
+                except asyncio.TimeoutError:
+                    raise asyncio.TimeoutError(
+                        f"codex turn on {self.backend} made no progress for "
+                        f"{self.idle_timeout}s"
+                    ) from None
+            else:
+                message = session.next_message(deadline)
             if message.get("id") is not None:
                 continue  # a response, not a notification
             method = message.get("method")
+            if idle_until is not None and method in PROGRESS_METHODS:
+                idle_until = time.monotonic() + self.idle_timeout
             params = message.get("params") or {}
             if method == "item/completed":
                 item = params.get("item") or {}

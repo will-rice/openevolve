@@ -126,6 +126,15 @@ class LLMModelConfig:
     # Unset is OpenAI's provider on the app-server's ChatGPT login
     model_provider: Optional[Dict[str, Dict[str, Any]]] = None
 
+    # Codex app-server: when set, a turn fails only after this many seconds without a
+    # notification that it progresses (an item, a delta, token usage), not after
+    # `timeout`, which then bounds only its start (the handshake to turn/start)
+    idle_timeout: Optional[int] = None
+
+    # Codex app-server, with idle_timeout: the whole turn's limit in seconds; unset,
+    # a turn that keeps progressing has none
+    turn_timeout: Optional[int] = None
+
     # Codex app-server: the model's context window in tokens, sent as the thread's
     # model_context_window; codex compacts at 90% of it. Codex's own value for the
     # model when unset (272,000 for a model it does not know)
