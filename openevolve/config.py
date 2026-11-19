@@ -119,6 +119,18 @@ class LLMModelConfig:
     # search runs as the model's tool on the provider's side, not in the sandbox
     web_search: Optional[str] = None
 
+    # Codex app-server: a model provider other than OpenAI's, as {id: definition},
+    # one entry: the id the thread selects (ThreadStartParams.modelProvider) and the
+    # definition codex reads as config.toml's [model_providers.<id>] table (base_url,
+    # wire_api, env_key, query_params, ...), sent as the thread's config override.
+    # Unset is OpenAI's provider on the app-server's ChatGPT login
+    model_provider: Optional[Dict[str, Dict[str, Any]]] = None
+
+    # Codex app-server: the model's context window in tokens, sent as the thread's
+    # model_context_window; codex compacts at 90% of it. Codex's own value for the
+    # model when unset (272,000 for a model it does not know)
+    context_window: Optional[int] = None
+
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None

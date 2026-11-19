@@ -195,6 +195,8 @@ def _make_cfg(**overrides):
         "workspace_root": None,
         "reply_file": None,
         "web_search": None,
+        "model_provider": None,
+        "context_window": None,
         "init_client": None,
         "provider": None,
     }

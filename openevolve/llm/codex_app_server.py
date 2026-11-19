@@ -5,7 +5,8 @@ Uses the Codex CLI's app-server (`codex app-server`) as a non-interactive LLM
 backend, enabling OpenEvolve to run with models available through a ChatGPT
 (Codex) subscription without requiring direct API keys.
 
-Authentication is delegated entirely to the app-server's managed ChatGPT login
+On OpenAI's provider (the default; see `model_provider` below for another),
+authentication is delegated entirely to the app-server's managed ChatGPT login
 (browser or device-code flow): the app-server persists the tokens itself and
 refreshes them automatically. This adapter never reads the CLI's token files.
 Before running a turn it asks the app-server for the current account state
@@ -55,6 +56,17 @@ Notes:
   notification with `codexErrorInfo` "usageLimitExceeded") raises
   CodexUsageLimitError at once, never retried: another call only meets the same
   limit. The caller decides when to try again.
+- With `model_provider` ({id: definition}), the thread runs on that provider in
+  place of OpenAI's: `modelProvider` is the id and the definition is the thread's
+  `model_providers.<id>` config override, the table config.toml would hold
+  (codex-rs/model-provider-info/src/lib.rs:121-199, rust-v0.161.0). Such a provider
+  authenticates by its own `env_key` (or none, for a local server), so no ChatGPT
+  login is checked; without one, OpenAI's provider always requires it. `web_search`
+  must then be set: codex's default ("cached") sends OpenAI's hosted web_search tool
+  to any provider (core/src/tools/spec_plan.rs:633-648), which a server without it
+  cannot run. `context_window` sets the thread's `model_context_window`, which a
+  model codex does not know needs (its fallback is 272,000 tokens,
+  models-manager/src/model_info.rs:99-130).
 - The stdio transport is unsupported on Windows; the backend expects a POSIX
   shell there.
 """
@@ -64,6 +76,7 @@ import json
 import logging
 import os
 import queue
+import re
 import subprocess
 import tempfile
 import threading
@@ -82,6 +95,25 @@ VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 VALID_SANDBOX_MODES = ("read-only", "workspace-write", "danger-full-access")
 # ThreadStartParams.config.web_search: the app-server's WebSearchMode string enum.
 VALID_WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
+
+# The provider ids codex defines itself. A configured entry under one of these ids
+# is ignored, the built-in kept (merge_configured_model_providers,
+# codex-rs/model-provider-info/src/lib.rs:691-726, rust-v0.161.0), so a custom
+# provider needs another id. OPENAI_PROVIDER_ID is the default provider's.
+OPENAI_PROVIDER_ID = "openai"
+BUILT_IN_PROVIDER_IDS = (
+    OPENAI_PROVIDER_ID,
+    "ollama",
+    "lmstudio",
+    "amazon-bedrock",
+    "amazon-bedrock-runtime",
+)
+# A provider id is one segment of the dotted config path model_providers.<id>
+# (codex-rs/config/src/overrides.rs:18-24 splits the path at dots).
+PROVIDER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+# The wire APIs codex 0.161 accepts: "chat" was removed
+# (codex-rs/model-provider-info/src/lib.rs:119-131).
+VALID_WIRE_APIS = ("responses",)
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
@@ -273,6 +305,12 @@ class CodexAppServerLLM(LLMInterface):
         self.workspace_root = getattr(model_cfg, "workspace_root", None)
         self.reply_file = getattr(model_cfg, "reply_file", None)
         self.web_search = getattr(model_cfg, "web_search", None)
+        self.model_provider = getattr(model_cfg, "model_provider", None)
+        self.context_window = getattr(model_cfg, "context_window", None)
+        if self.model_provider is not None:
+            self._check_model_provider()
+        if self.context_window is not None and self.context_window <= 0:
+            raise ValueError(f"context_window must be positive, not {self.context_window}")
         # The final agent message of the latest turn that completed, the reply or,
         # with reply_file, beside it; the evolution loop reads it from the ensemble
         # (LLMEnsemble.last_message) for the evaluator (ChildContext.llm_message).
@@ -306,6 +344,37 @@ class CodexAppServerLLM(LLMInterface):
                 f"Expected one of {', '.join(VALID_REASONING_EFFORTS)}"
             )
         logger.info(f"Initialized CodexAppServerLLM with model: {self.model}")
+
+    def _check_model_provider(self) -> None:
+        """Raise ValueError unless model_provider is one custom provider codex runs."""
+        if len(self.model_provider) != 1:
+            raise ValueError(
+                f"model_provider must hold one provider, not {len(self.model_provider)}"
+            )
+        ((provider_id, definition),) = self.model_provider.items()
+        if not PROVIDER_ID_PATTERN.match(provider_id):
+            raise ValueError(
+                f"model_provider id {provider_id!r} must match {PROVIDER_ID_PATTERN.pattern}"
+            )
+        if provider_id in BUILT_IN_PROVIDER_IDS:
+            raise ValueError(
+                f"model_provider id {provider_id!r} is codex's own, which ignores a "
+                "definition under it; leave model_provider unset for OpenAI's, or "
+                "name a custom provider otherwise"
+            )
+        if not definition.get("base_url"):
+            raise ValueError(f"model_provider {provider_id!r} needs a base_url")
+        wire_api = definition.get("wire_api", VALID_WIRE_APIS[0])
+        if wire_api not in VALID_WIRE_APIS:
+            raise ValueError(
+                f"model_provider {provider_id!r} wire_api {wire_api!r}: codex speaks "
+                f"only {', '.join(VALID_WIRE_APIS)}"
+            )
+        if self.web_search is None:
+            raise ValueError(
+                f"model_provider {provider_id!r} needs web_search set: codex's default "
+                "sends OpenAI's hosted web_search tool to the provider"
+            )
 
     async def generate(self, prompt: str, **kwargs) -> str:
         sys_msg = kwargs.pop("system_message", self.system_message) or ""
@@ -417,9 +486,12 @@ class CodexAppServerLLM(LLMInterface):
             session.request("initialize", {"clientInfo": _CLIENT_INFO}, deadline)
             session.notify("initialized")
 
-            # Auth boundary: the app-server owns the ChatGPT login and token
-            # refresh; verify it has a usable subscription account up front.
-            self._ensure_authenticated(session, deadline)
+            # Auth boundary: on OpenAI's provider the app-server owns the ChatGPT
+            # login and token refresh; verify it has a usable subscription account
+            # up front. A custom provider authenticates by its own env_key, or not
+            # at all, and the ChatGPT account is not what it bills.
+            if self.model_provider is None:
+                self._ensure_authenticated(session, deadline)
 
             thread_params: Dict[str, Any] = {
                 "model": self.model,
@@ -432,8 +504,17 @@ class CodexAppServerLLM(LLMInterface):
             }
             if cwd is not None:
                 thread_params["cwd"] = cwd
+            config: Dict[str, Any] = {}
             if self.web_search is not None:
-                thread_params["config"] = {"web_search": self.web_search}
+                config["web_search"] = self.web_search
+            if self.context_window is not None:
+                config["model_context_window"] = self.context_window
+            if self.model_provider is not None:
+                ((provider_id, definition),) = self.model_provider.items()
+                thread_params["modelProvider"] = provider_id
+                config[f"model_providers.{provider_id}"] = definition
+            if config:
+                thread_params["config"] = config
             thread_result = session.request("thread/start", thread_params, deadline)
             thread_id = (thread_result or {}).get("thread", {}).get("id")
             if not thread_id:
