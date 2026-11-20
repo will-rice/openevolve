@@ -1,172 +1,138 @@
-"""Tests for the Claude Code CLI LLM backend."""
+"""Tests for the Claude Code CLI LLM backend.
+
+Every call starts a real process: `claude_command` runs tests/fake_claude_code.py, which
+logs what it was given and prints a recorded run's stream-json:
+claude_code_edit_turn.jsonl, Claude Code 2.1.321 on deepseek-v4.1-flash behind an
+Anthropic-compatible endpoint editing program.py (2026-11-20), and
+claude_code_rate_limited_turn.jsonl, a run there that ended on the endpoint's 429.
+"""
 
 import asyncio
+import json
 import sys
+import tempfile
 import unittest
-from unittest.mock import MagicMock, patch
+from pathlib import Path
 
+from openevolve.config import Config, LLMModelConfig
 from openevolve.llm.claude_code import ClaudeCodeLLM, init_claude_code_client
+
+FAKE = Path(__file__).parent / "fake_claude_code.py"
+EDIT_TURN = Path(__file__).parent / "claude_code_edit_turn.jsonl"
+RATE_LIMITED_TURN = Path(__file__).parent / "claude_code_rate_limited_turn.jsonl"
+# The edit turn's final message.
+REPLY = "`program.py` now returns `x+2`. Output of the command:\n\n```\n3\n```"
+
+
+def model_config(log: Path, stream: Path, sleep: float = 0, *program: str, **changes):
+    """A claude_code model whose `claude` is the fake logging to `log`."""
+    values = {
+        "name": "deepseek-v4.1-flash",
+        "provider": "claude_code",
+        "timeout": 30,
+        "retries": 0,
+        "retry_delay": 0,
+        "claude_command": [sys.executable, str(FAKE), str(log), str(stream), str(sleep), *program],
+    }
+    return LLMModelConfig(**{**values, **changes})
+
+
+def runs(log: Path) -> list:
+    """What each run the fake answered saw, in order."""
+    return [json.loads(line) for line in log.read_text().splitlines()]
 
 
 class TestClaudeCodeLLM(unittest.TestCase):
-    def _make_cfg(self, **overrides):
-        cfg = MagicMock()
-        cfg.name = overrides.get("name", "sonnet")
-        cfg.system_message = overrides.get("system_message", None)
-        cfg.max_tokens = overrides.get("max_tokens", 16000)
-        cfg.timeout = overrides.get("timeout", 60)
-        cfg.weight = overrides.get("weight", 1.0)
-        cfg.retries = overrides.get("retries", 3)
-        cfg.retry_delay = overrides.get("retry_delay", 5)
-        cfg.max_budget_usd = overrides.get("max_budget_usd", 1.0)
-        cfg.cwd = overrides.get("cwd", None)
-        return cfg
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.tmp = Path(directory.name)
+        self.log = self.tmp / "runs.jsonl"
+        self.root = self.tmp / "workspaces"
+        self.root.mkdir()
 
-    def test_init_defaults(self):
-        llm = ClaudeCodeLLM(self._make_cfg())
-        self.assertEqual(llm.model, "sonnet")
-        self.assertEqual(llm.max_tokens, 16000)
-        self.assertEqual(llm.timeout, 60)
-        self.assertEqual(llm.weight, 1.0)
+    def test_the_reply_is_the_runs_final_message(self):
+        """The system message and prompt go on stdin; the reply is the result's text."""
+        llm = ClaudeCodeLLM(model_config(self.log, EDIT_TURN, claude_args=["--tools", "Read"]))
 
-    def test_init_with_custom_model(self):
-        llm = ClaudeCodeLLM(self._make_cfg(name="opus"))
-        self.assertEqual(llm.model, "opus")
+        reply = asyncio.run(llm.generate("p", system_message="s"))
 
-    def test_factory_function(self):
-        cfg = self._make_cfg()
-        llm = init_claude_code_client(cfg)
-        self.assertIsInstance(llm, ClaudeCodeLLM)
-        self.assertEqual(llm.model, "sonnet")
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_generate_calls_cli(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="Generated response text", stderr="")
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10))
-        result = asyncio.run(llm.generate("test prompt"))
-        self.assertEqual(result, "Generated response text")
-        mock_run.assert_called_once()
-        cmd = mock_run.call_args[0][0]
-        self.assertEqual(cmd[0], "claude")
-        self.assertIn("-p", cmd)
-        self.assertIn("--model", cmd)
-        self.assertIn("sonnet", cmd)
-        self.assertNotIn("test prompt", cmd)
-        self.assertEqual(mock_run.call_args.kwargs["input"], "test prompt")
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_large_prompt_not_passed_as_argument(self, mock_run):
-        # Linux caps a single argv string at 128 KiB (MAX_ARG_STRLEN); a prompt that
-        # carries a few parent programs easily exceeds it, so it must go through stdin.
-        mock_run.return_value = MagicMock(returncode=0, stdout="response", stderr="")
-        llm = ClaudeCodeLLM()
-        prompt = "x" * 200_000
-        asyncio.run(llm.generate(prompt))
-        cmd = mock_run.call_args[0][0]
-        self.assertTrue(all(len(arg) < 128 * 1024 for arg in cmd))
-        self.assertEqual(mock_run.call_args.kwargs["input"], prompt)
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_system_message_passed(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="response", stderr="")
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10))
-        asyncio.run(llm.generate("prompt", system_message="You are an expert."))
-        cmd = mock_run.call_args[0][0]
-        idx = cmd.index("--system-prompt")
-        self.assertEqual(cmd[idx + 1], "You are an expert.")
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_empty_response_raises(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error msg")
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10, retries=0))
-        with self.assertRaises(RuntimeError):
-            asyncio.run(llm.generate("test prompt"))
-
-    def test_nonzero_exit_with_stdout_raises(self):
-        llm = ClaudeCodeLLM(self._make_cfg())
-        command = [
-            sys.executable,
-            "-c",
-            "import sys; print('partial output'); "
-            "print('provider failed', file=sys.stderr); sys.exit(7)",
-        ]
-        with self.assertRaisesRegex(RuntimeError, "exited with code 7.*provider failed"):
-            llm._run_cli(command, timeout=5)
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_retry_after_failure_with_stdout(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(returncode=7, stdout="partial output", stderr="transient error"),
-            MagicMock(returncode=0, stdout="complete response", stderr=""),
-        ]
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10, retries=1, retry_delay=0))
-        result = asyncio.run(llm.generate("test prompt"))
-        self.assertEqual(result, "complete response")
-        self.assertEqual(mock_run.call_count, 2)
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_nonzero_exit_with_stdout_exhausts_retries(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=7, stdout="partial output", stderr="persistent error"
+        [run] = runs(self.log)
+        self.assertEqual(reply, REPLY)
+        self.assertEqual(llm.last_message, REPLY)
+        self.assertEqual(llm.last_backend, "claude-code/deepseek-v4.1-flash")
+        self.assertEqual(run["prompt"], "s\n\np")
+        self.assertEqual(
+            run["args"],
+            [
+                *("-p", "--output-format", "stream-json", "--verbose"),
+                *("--model", "deepseek-v4.1-flash", "--tools", "Read"),
+            ],
         )
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10, retries=2, retry_delay=0))
-        with self.assertRaisesRegex(RuntimeError, "exited with code 7"):
-            asyncio.run(llm.generate("test prompt"))
-        self.assertEqual(mock_run.call_count, 3)
 
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_retry_on_failure(self, mock_run):
-        mock_run.side_effect = [
-            MagicMock(returncode=1, stdout="", stderr="transient error"),
-            MagicMock(returncode=0, stdout="success after retry", stderr=""),
-        ]
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10, retries=1, retry_delay=0))
-        result = asyncio.run(llm.generate("test prompt", retry_delay=0))
-        self.assertEqual(result, "success after retry")
-        self.assertEqual(mock_run.call_count, 2)
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_retries_exhausted_raises(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="persistent error")
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10, retries=2, retry_delay=0))
-        with self.assertRaises(RuntimeError):
-            asyncio.run(llm.generate("test prompt", retry_delay=0))
-        self.assertEqual(mock_run.call_count, 3)
-
-    @patch("openevolve.llm.claude_code.subprocess.run")
-    def test_generate_with_context(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="ctx response", stderr="")
-        llm = ClaudeCodeLLM(self._make_cfg(timeout=10))
-        result = asyncio.run(
-            llm.generate_with_context(
-                system_message="sys",
-                messages=[
-                    {"role": "user", "content": "first"},
-                    {"role": "assistant", "content": "ignored"},
-                    {"role": "user", "content": "second"},
-                ],
+    def test_a_writable_runs_reply_is_the_file_it_left(self):
+        """The run sees its workspace files; the reply is reply_file as it left it."""
+        llm = ClaudeCodeLLM(
+            model_config(
+                self.log,
+                EDIT_TURN,
+                0,
+                "def f(x):\n    return x+2\n",
+                sandbox_mode="workspace-write",
+                workspace_root=str(self.root),
+                reply_file="program.py",
             )
         )
-        self.assertEqual(result, "ctx response")
-        self.assertIn("first\n\nsecond", mock_run.call_args.kwargs["input"])
+
+        reply = asyncio.run(
+            llm.generate("p", workspace_files={"program.py": "def f(x):\n    return x+1\n"})
+        )
+
+        [run] = runs(self.log)
+        self.assertEqual(reply, "def f(x):\n    return x+2\n")
+        self.assertEqual(llm.last_message, REPLY)
+        self.assertEqual(run["files"], {"program.py": "def f(x):\n    return x+1\n"})
+        self.assertEqual(Path(run["cwd"]).parent, self.root)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_a_run_that_ends_on_an_error_fails_and_is_retried(self):
+        """A result with is_error (subtype success here) fails with its text; a retry reruns."""
+        llm = ClaudeCodeLLM(model_config(self.log, RATE_LIMITED_TURN, retries=1))
+
+        with self.assertRaisesRegex(
+            RuntimeError, r"failed: success: API Error: Request rejected \(429\)"
+        ):
+            asyncio.run(llm.generate("p"))
+
+        self.assertEqual(len(runs(self.log)), 2)
+
+    def test_a_run_without_progress_times_out_at_the_idle_limit(self):
+        """Events restart idle_timeout; a run silent for longer fails."""
+        progressing = ClaudeCodeLLM(
+            model_config(self.log, EDIT_TURN, 0.2, timeout=1, idle_timeout=1)
+        )
+        self.assertEqual(asyncio.run(progressing.generate("p")), REPLY)
+
+        silent = ClaudeCodeLLM(model_config(self.log, EDIT_TURN, 2, timeout=1, idle_timeout=1))
+        with self.assertRaisesRegex(asyncio.TimeoutError, "made no progress for 1s"):
+            asyncio.run(silent.generate("p"))
+
+    def test_factory_function(self):
+        llm = init_claude_code_client(LLMModelConfig(name="sonnet"))
+        self.assertIsInstance(llm, ClaudeCodeLLM)
+        self.assertEqual(llm.model, "sonnet")
 
 
 class TestMaxBudgetConfig(unittest.TestCase):
     def test_max_budget_usd_in_model_config(self):
-        from openevolve.config import LLMModelConfig
-
         cfg = LLMModelConfig(max_budget_usd=2.5)
         self.assertEqual(cfg.max_budget_usd, 2.5)
 
     def test_max_budget_usd_default_none(self):
-        from openevolve.config import LLMModelConfig
-
         cfg = LLMModelConfig()
         self.assertIsNone(cfg.max_budget_usd)
 
     def test_max_budget_usd_from_dict(self):
-        from openevolve.config import Config
-
         config = Config.from_dict(
             {
                 "llm": {
@@ -176,6 +142,11 @@ class TestMaxBudgetConfig(unittest.TestCase):
             }
         )
         self.assertEqual(config.llm.models[0].max_budget_usd, 3.0)
+
+    def test_max_budget_usd_reaches_the_command(self):
+        llm = ClaudeCodeLLM(LLMModelConfig(name="sonnet", max_budget_usd=2.5))
+        command = llm._build_command()
+        self.assertEqual(command[command.index("--max-budget-usd") + 1], "2.5")
 
 
 class TestProviderRegistry(unittest.TestCase):
@@ -187,17 +158,7 @@ class TestProviderRegistry(unittest.TestCase):
     def test_ensemble_creates_claude_code(self):
         from openevolve.llm.ensemble import _create_model
 
-        cfg = MagicMock()
-        cfg.init_client = None
-        cfg.provider = "claude_code"
-        cfg.name = "sonnet"
-        cfg.system_message = None
-        cfg.max_tokens = 4096
-        cfg.timeout = 60
-        cfg.weight = 1.0
-        cfg.max_budget_usd = 1.0
-        cfg.cwd = None
-        model = _create_model(cfg)
+        model = _create_model(LLMModelConfig(name="sonnet", provider="claude_code"))
         self.assertIsInstance(model, ClaudeCodeLLM)
 
 

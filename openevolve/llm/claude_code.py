@@ -1,9 +1,14 @@
 """
 Claude Code CLI interface for LLMs.
 
-Uses the Claude Code CLI (`claude -p`) as a non-interactive LLM backend,
-enabling OpenEvolve to run with Anthropic's Claude models without requiring
-direct API keys — authentication is handled by the CLI's OAuth session.
+Runs the Claude Code CLI headless (`claude -p`,
+https://code.claude.com/docs/en/headless) as an agent backend, one process per call,
+on Anthropic's API through the CLI's own login, or on any Anthropic-compatible
+endpoint its environment or `claude_args` name (e.g. `--settings` holding an "env"
+table with ANTHROPIC_BASE_URL). It shares CodexAppServerLLM's call handling: the
+per-call workspace (`workspace_root`, `workspace_files`), `reply_file`, the retries,
+`timeout`, `idle_timeout` and `turn_timeout`, `last_message` and `last_backend`; only
+the turn differs.
 
 Usage in config.yaml:
     llm:
@@ -11,130 +16,132 @@ Usage in config.yaml:
       models:
         - name: "sonnet"
           weight: 1.0
-          max_tokens: 16000
           timeout: 300
 
 Or inject programmatically:
     from openevolve.llm.claude_code import init_claude_code_client
     for model_cfg in config.llm.models:
         model_cfg.init_client = init_claude_code_client
+
+Notes:
+- The command is `claude_command` (["claude"] when unset; a launcher may go first),
+  then `-p --output-format stream-json --verbose --model <name>`, then
+  `--max-budget-usd` when `max_budget_usd` is set, then `claude_args` (tools,
+  permission mode, settings). The system message and the prompt go on stdin as one
+  text, as the Codex provider sends them, which `-p` reads when no prompt argument
+  is given, so their size is not bounded by Linux's 128 KiB argument limit; Claude
+  Code's own system prompt, which tells the model its tools, stays.
+- Each stdout line is one stream-json event. The turn ends at the `result` event,
+  whose `result` is the agent's final message; `is_error`, or a subtype other than
+  "success" (error_max_turns, error_during_execution, error_max_budget_usd, ...:
+  SDKResultMessage, https://code.claude.com/docs/en/agent-sdk/typescript), fails
+  the call.
+- With `idle_timeout`, every event but `system/api_retry`, which Claude Code emits
+  before it retries a failed request, restarts it: a server that keeps refusing is
+  not progress.
+- `last_backend` is "claude-code/<model>".
 """
 
 import asyncio
 import logging
+import math
 import subprocess
-from typing import Dict, List, Optional
+import time
+from typing import List, Optional
 
-from openevolve.llm.base import LLMInterface
+from openevolve.llm.codex_app_server import CodexAppServerLLM, _AppServerSession, _cfg_value
 
 logger = logging.getLogger(__name__)
 
+# The provider id of `last_backend`.
+CLAUDE_CODE_PROVIDER_ID = "claude-code"
+# The stream-json event Claude Code emits before it retries a failed API request.
+API_RETRY = ("system", "api_retry")
 
-class ClaudeCodeLLM(LLMInterface):
-    """LLM interface that uses the Claude Code CLI for generation.
 
-    Requires `claude` CLI to be installed and authenticated
-    (run `claude login` first).
+class ClaudeCodeLLM(CodexAppServerLLM):
+    """LLM interface that generates through a headless Claude Code run.
+
+    Requires the `claude` CLI, logged in or pointed at an endpoint with a key.
     """
 
     def __init__(self, model_cfg=None):
-        self.model = getattr(model_cfg, "name", "sonnet")
-        self.system_message = getattr(model_cfg, "system_message", None)
-        self.max_tokens = getattr(model_cfg, "max_tokens", 16000)
-        self.timeout = getattr(model_cfg, "timeout", 300)
-        self.weight = getattr(model_cfg, "weight", 1.0)
-        self.retries = getattr(model_cfg, "retries", 3)
-        self.retry_delay = getattr(model_cfg, "retry_delay", 5)
-        self.max_budget_usd = getattr(model_cfg, "max_budget_usd", 1.0)
-        self.cwd = getattr(model_cfg, "cwd", None)
-        logger.info(f"Initialized ClaudeCodeLLM with model: {self.model}")
+        super().__init__(model_cfg)
+        self.model = _cfg_value(model_cfg, "name", "sonnet")
+        self.claude_command = list(_cfg_value(model_cfg, "claude_command", ["claude"]))
+        self.claude_args = list(_cfg_value(model_cfg, "claude_args", []))
+        self.max_budget_usd = getattr(model_cfg, "max_budget_usd", None)
 
-    async def generate(self, prompt: str, **kwargs) -> str:
-        sys_msg = kwargs.pop("system_message", self.system_message) or ""
-        return await self.generate_with_context(
-            system_message=sys_msg,
-            messages=[{"role": "user", "content": prompt}],
-            **kwargs,
+    @property
+    def backend(self) -> str:
+        """The backend this provider's turns run on: "claude-code/<model>"."""
+        return f"{CLAUDE_CODE_PROVIDER_ID}/{self.model}"
+
+    def _build_command(self) -> List[str]:
+        budget = (
+            [] if self.max_budget_usd is None else ["--max-budget-usd", str(self.max_budget_usd)]
         )
-
-    async def generate_with_context(
-        self, system_message: str, messages: List[Dict[str, str]], **kwargs
-    ) -> str:
-        user_content = "\n\n".join(
-            m.get("content", "") for m in messages if m.get("role") == "user"
-        )
-
-        cmd = [
-            "claude",
-            "-p",
-            "--model",
-            self.model,
-            "--no-session-persistence",
-            "--output-format",
-            "text",
+        return [
+            *self.claude_command,
+            *("-p", "--output-format", "stream-json", "--verbose"),
+            *("--model", self.model),
+            *budget,
+            *self.claude_args,
         ]
-        if system_message:
-            cmd.extend(["--system-prompt", system_message])
 
-        budget = kwargs.get("max_budget_usd", self.max_budget_usd)
-        cmd.extend(["--max-budget-usd", str(budget)])
-
-        # The prompt goes through stdin: as one argv string it hits Linux's 128 KiB
-        # per-argument limit (MAX_ARG_STRLEN) once a few programs are in the prompt.
-
-        timeout = kwargs.get("timeout", self.timeout)
-        retries = kwargs.get("retries", self.retries)
-        retry_delay = kwargs.get("retry_delay", self.retry_delay)
-
-        loop = asyncio.get_event_loop()
-        for attempt in range(retries + 1):
-            try:
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: self._run_cli(cmd, timeout, user_content)),
-                    timeout=timeout + 30,
-                )
-                return result
-            except asyncio.TimeoutError:
-                if attempt < retries:
-                    logger.warning(
-                        f"Claude Code CLI timeout on attempt {attempt + 1}/{retries + 1}. Retrying..."
-                    )
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error(f"All {retries + 1} attempts failed with timeout")
-                    raise
-            except Exception as e:
-                if attempt < retries:
-                    logger.warning(
-                        f"Claude Code CLI error on attempt {attempt + 1}/{retries + 1}: {e}. Retrying..."
-                    )
-                    await asyncio.sleep(retry_delay)
-                else:
-                    logger.error(f"All {retries + 1} attempts failed with error: {e}")
-                    raise
-
-    def _run_cli(self, cmd: list, timeout: int, prompt: Optional[str] = None) -> str:
+    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str]) -> str:
+        proc = subprocess.Popen(
+            self._build_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            cwd=cwd,
+        )
+        session = _AppServerSession(proc)
         try:
-            result = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=timeout,
-                cwd=self.cwd,
-            )
-            if result.returncode != 0:
-                stderr = result.stderr.strip()
-                raise RuntimeError(
-                    f"Claude CLI exited with code {result.returncode}. stderr: {stderr[:500]}"
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+            start = time.monotonic()
+            if self.idle_timeout is None:
+                deadline, idle_until = start + timeout, math.inf
+            else:
+                limit = math.inf if self.turn_timeout is None else self.turn_timeout
+                deadline, idle_until = start + limit, start + self.idle_timeout
+            while True:
+                try:
+                    event = session.next_message(min(deadline, idle_until))
+                except asyncio.TimeoutError:
+                    if idle_until < deadline:
+                        raise asyncio.TimeoutError(
+                            f"Claude Code turn on {self.backend} made no progress for "
+                            f"{self.idle_timeout}s"
+                        ) from None
+                    raise
+                if (event.get("type"), event.get("subtype")) == API_RETRY:
+                    logger.warning(f"Claude Code on {self.backend} retries a request: {event}")
+                elif self.idle_timeout is not None:
+                    idle_until = time.monotonic() + self.idle_timeout
+                if event.get("type") != "result":
+                    continue
+                if event.get("is_error") or event.get("subtype") != "success":
+                    raise RuntimeError(
+                        f"Claude Code turn on {self.backend} failed: {event.get('subtype')}: "
+                        f"{event.get('result') or event.get('errors')}"
+                    )
+                text = event.get("result") or ""
+                logger.info(
+                    f"Claude Code turn on {self.backend} completed in "
+                    f"{event.get('num_turns')} model turns"
                 )
-            output = result.stdout.strip()
-            if not output:
-                raise RuntimeError(f"Empty response from Claude CLI. stderr: {result.stderr[:500]}")
-            return output
-        except subprocess.TimeoutExpired:
-            raise asyncio.TimeoutError("Claude CLI subprocess timed out")
+                if self.reply_file is None and not text.strip():
+                    raise RuntimeError(
+                        f"Empty response from Claude Code. stderr: {session.stderr_summary()}"
+                    )
+                return text
+        finally:
+            session.close()
 
 
 def init_claude_code_client(model_cfg):

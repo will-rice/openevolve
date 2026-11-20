@@ -23,11 +23,13 @@ case = sys.argv[1]
 if case in ('claude_output', 'claude_input'):
     from openevolve.llm.claude_code import ClaudeCodeLLM
     model = ClaudeCodeLLM()
-    if case == 'claude_input':
-        command = [sys.executable, '-c', 'import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())']
-        result = model._run_cli(command, timeout=5, prompt=text)
-    else:
-        result = model._run_cli(command, timeout=5)
+    # A stream-json result event whose text is stdin's (claude_input) or `text`.
+    source = 'sys.stdin.buffer.read().decode()' if case == 'claude_input' else ascii(text)
+    command = [sys.executable, '-c', 'import json, sys; sys.stdout.buffer.write((json.dumps('
+               '{"type": "result", "subtype": "success", "is_error": False, "result": '
+               + source + '}, ensure_ascii=False) + chr(10)).encode("utf-8"))']
+    with patch.object(model, '_build_command', return_value=command):
+        result = model._run_turn(text, timeout=5, cwd=None)
 elif case == 'copilot_output':
     from openevolve.llm.copilot_cli import CopilotCLILLM
     result = CopilotCLILLM()._run_cli(command, timeout=5)

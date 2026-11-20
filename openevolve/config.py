@@ -86,6 +86,15 @@ class LLMModelConfig:
     # Claude Code CLI budget per call (USD)
     max_budget_usd: Optional[float] = None
 
+    # Claude Code CLI: the argv that starts Claude Code, before `-p` (["claude"] when
+    # unset); a launcher may go first
+    claude_command: Optional[List[str]] = None
+
+    # Claude Code CLI: arguments after the provider's own (`-p --output-format
+    # stream-json --verbose --model <name>`), e.g. --tools, --permission-mode and
+    # --settings
+    claude_args: Optional[List[str]] = None
+
     # GitHub Copilot CLI budget per call (AI credits)
     max_ai_credits: Optional[float] = None
 
