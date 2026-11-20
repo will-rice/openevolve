@@ -21,12 +21,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from test_codex_app_server_llm import _make_cfg, run_generate
+
 from openevolve.config import LLMModelConfig
 from openevolve.llm.codex_app_server import (
     CodexAppServerLLM,
     CodexAuthError,
 )
-from test_codex_app_server_llm import _make_cfg, run_generate
 
 FAKE = Path(__file__).parent / "fake_codex_app_server.py"
 UNREACHABLE_TURN = Path(__file__).parent / "codex_unreachable_provider_turn.jsonl"
@@ -54,6 +55,22 @@ class TestThreadParams(unittest.TestCase):
                 "web_search": "disabled",
                 "model_context_window": 131072,
                 "model_providers.local": LOCAL,
+            },
+        )
+
+    def test_codex_config_adds_to_the_threads_config(self):
+        """codex_config's overrides go with the provider's, e.g. multi-agent off."""
+        outcome, fake, _ = run_generate(
+            cfg_overrides=local_overrides(codex_config={"features.multi_agent": False})
+        )
+        self.assertIsNone(outcome["error"])
+        params = next(p for m, p in fake.requests if m == "thread/start")
+        self.assertEqual(
+            params["config"],
+            {
+                "web_search": "disabled",
+                "model_providers.local": LOCAL,
+                "features.multi_agent": False,
             },
         )
 
@@ -107,6 +124,11 @@ class TestRefusedProviders(unittest.TestCase):
 
     def test_a_non_positive_context_window_is_refused(self):
         self.assert_refused("context_window", context_window=0)
+
+    def test_codex_config_that_repeats_another_fields_key_is_refused(self):
+        for key in ("web_search", "model_context_window", "model_providers.other"):
+            with self.subTest(key=key):
+                self.assert_refused("codex_config sets", **local_overrides(codex_config={key: 1}))
 
 
 def local_llm(log, turn, timeout):

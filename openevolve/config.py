@@ -140,6 +140,13 @@ class LLMModelConfig:
     # model when unset (272,000 for a model it does not know)
     context_window: Optional[int] = None
 
+    # Codex app-server: more of the thread's config overrides, {dotted key: value},
+    # sent beside web_search, model_context_window and model_providers.<id> in
+    # ThreadStartParams.config, which they must not repeat; e.g.
+    # {"features.multi_agent": False} for a provider that rejects the "namespace"
+    # tool codex sends its multi-agent tools as
+    codex_config: Optional[Dict[str, Any]] = None
+
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None

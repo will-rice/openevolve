@@ -86,6 +86,12 @@ Notes:
   cannot run. `context_window` sets the thread's `model_context_window`, which a
   model codex does not know needs (its fallback is 272,000 tokens,
   models-manager/src/model_info.rs:99-130).
+- `codex_config` ({dotted key: value}) adds to the thread's config overrides,
+  for what the other fields do not set: a provider that speaks only Chat
+  Completions behind a Responses bridge rejects the "namespace" tool codex sends
+  its multi-agent tools as (spawn_agent and the rest), which
+  {"features.multi_agent": False} leaves out. A key the other fields set is
+  refused, so each override has one source.
 - The stdio transport is unsupported on Windows; the backend expects a POSIX
   shell there.
 """
@@ -354,6 +360,7 @@ class CodexAppServerLLM(LLMInterface):
         self.web_search = getattr(model_cfg, "web_search", None)
         self.model_provider = getattr(model_cfg, "model_provider", None)
         self.context_window = getattr(model_cfg, "context_window", None)
+        self.codex_config = getattr(model_cfg, "codex_config", None) or {}
         self.idle_timeout = getattr(model_cfg, "idle_timeout", None)
         self.turn_timeout = getattr(model_cfg, "turn_timeout", None)
         if self.idle_timeout is not None and self.idle_timeout <= 0:
@@ -367,6 +374,17 @@ class CodexAppServerLLM(LLMInterface):
             self._check_model_provider()
         if self.context_window is not None and self.context_window <= 0:
             raise ValueError(f"context_window must be positive, not {self.context_window}")
+        if owned := [
+            key
+            for key in self.codex_config
+            if key in ("web_search", "model_context_window")
+            or key == "model_providers"
+            or key.startswith("model_providers.")
+        ]:
+            raise ValueError(
+                f"codex_config sets {', '.join(owned)}, which web_search, "
+                "context_window and model_provider set"
+            )
         # The final agent message of the latest turn that completed, the reply or,
         # with reply_file, beside it; the evolution loop reads it from the ensemble
         # (LLMEnsemble.last_message) for the evaluator (ChildContext.llm_message).
@@ -590,6 +608,7 @@ class CodexAppServerLLM(LLMInterface):
                 ((provider_id, definition),) = self.model_provider.items()
                 thread_params["modelProvider"] = provider_id
                 config[f"model_providers.{provider_id}"] = definition
+            config.update(self.codex_config)
             if config:
                 thread_params["config"] = config
             thread_result = session.request("thread/start", thread_params, deadline)
