@@ -6,6 +6,7 @@ to maintain consistent behavior between single-process and parallel execution mo
 """
 
 import random
+import re
 import unittest
 from math import fsum
 from unittest.mock import patch
@@ -63,50 +64,33 @@ class TestSampleFromIslandRatios(unittest.TestCase):
             self.db.add(program, target_island=2)
 
     def test_exploration_exploitation_random_ratios(self):
-        """Test that sample_from_island respects exploration/exploitation/random ratios"""
-        # Set random seed for reproducibility
-        random.seed(42)
+        """Each sample_from_island call takes the mode its first random draw falls in
 
-        # Sample many times and track which mode was used
-        num_samples = 1000
-        exploration_count = 0
-        exploitation_count = 0
-        weighted_count = 0
+        Seeding the global random module before each call fixes that draw, so the
+        expected mode is known without depending on how many draws the sampling
+        consumes, which varies with the hash order of the island's program ids."""
+        exploration = self.db.config.exploration_ratio
+        exploitation = exploration + self.db.config.exploitation_ratio
+        expected = []
+        with self.assertLogs("openevolve.database", level="DEBUG") as logs:
+            for seed in range(1000):
+                rand_val = random.Random(seed).random()
+                if rand_val < exploration:
+                    expected.append("exploration")
+                elif rand_val < exploitation:
+                    expected.append("exploitation")
+                else:
+                    expected.append("weighted")
+                random.seed(seed)
+                self.db.sample_from_island(island_id=0)
 
-        for _ in range(num_samples):
-            # Set seed and get rand_val that will be used
-            # We need to track what the internal rand_val would be
-            rand_val = random.random()
-
-            # Reset seed to get same rand_val in sample_from_island
-            random.seed(random.getstate()[1][0])  # Use current state
-
-            parent, inspirations = self.db.sample_from_island(island_id=0)
-
-            # Determine which mode should have been used based on rand_val
-            if rand_val < self.db.config.exploration_ratio:
-                exploration_count += 1
-            elif rand_val < self.db.config.exploration_ratio + self.db.config.exploitation_ratio:
-                exploitation_count += 1
-            else:
-                weighted_count += 1
-
-        # Check that counts are within reasonable bounds (allowing 10% variance)
-        expected_exploration = num_samples * self.db.config.exploration_ratio
-        expected_exploitation = num_samples * self.db.config.exploitation_ratio
-        expected_weighted = num_samples * (1 - self.db.config.exploration_ratio - self.db.config.exploitation_ratio)
-
-        # Allow 15% tolerance for statistical variance
-        tolerance = 0.15
-
-        self.assertGreater(exploration_count, expected_exploration * (1 - tolerance))
-        self.assertLess(exploration_count, expected_exploration * (1 + tolerance))
-
-        self.assertGreater(exploitation_count, expected_exploitation * (1 - tolerance))
-        self.assertLess(exploitation_count, expected_exploitation * (1 + tolerance))
-
-        self.assertGreater(weighted_count, expected_weighted * (1 - tolerance))
-        self.assertLess(weighted_count, expected_weighted * (1 + tolerance))
+        modes = [
+            re.search(r"\(mode: (\w+),", line).group(1)
+            for line in logs.output
+            if "Sampled parent" in line
+        ]
+        self.assertEqual(modes, expected)
+        self.assertEqual(set(modes), {"exploration", "exploitation", "weighted"})
 
     def test_sample_from_island_returns_from_correct_island(self):
         """Test that sampled parent is actually from the requested island"""
@@ -173,6 +157,7 @@ class TestSampleFromIslandRatios(unittest.TestCase):
 
         # Count occurrences
         from collections import Counter
+
         counts = Counter(sampled_ids)
 
         # In exploration mode (uniform random), all programs should have similar counts
