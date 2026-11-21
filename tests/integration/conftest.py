@@ -2,46 +2,53 @@
 Pytest fixtures for integration tests with optillm server
 """
 
-import pytest
-import subprocess
-import time
 import os
-import tempfile
 import shutil
-from pathlib import Path
+import subprocess
 
 # Import our test utilities
 import sys
+import tempfile
+import time
+from pathlib import Path
+
+import pytest
+
 sys.path.append(str(Path(__file__).parent.parent))
 from test_utils import (
-    start_test_server, 
-    stop_test_server, 
-    is_server_running, 
-    get_integration_config,
+    TEST_MODEL,
+    get_evolution_test_evaluator,
     get_evolution_test_program,
-    get_evolution_test_evaluator
+    get_integration_config,
+    get_test_client,
+    is_server_running,
+    start_test_server,
+    stop_test_server,
 )
 
 
 @pytest.fixture(scope="session")
 def optillm_server():
-    """Start optillm server for the test session"""
-    # Check if server is already running (for development)
-    if is_server_running(8000):
-        print("Using existing optillm server at localhost:8000")
-        yield {"proc": None, "port": 8000}  # Server already running, don't manage it
-        return
-    
-    print("Starting optillm server for integration tests...")
+    """Start optillm server for the test session, or reuse one on port 8000 (as CI starts it)
+
+    optillm loads the model on its first request, outside its cache lock
+    (optillm/inference.py get_or_load_model), so concurrent first requests load it
+    in parallel threads and one copy yields NaN logits: a CUDA device-side assert
+    that fails every later request. One request loads it before the tests send
+    their parallel ones."""
     proc = None
-    port = None
-    try:
+    port = 8000
+    if is_server_running(port):
+        print("Using existing optillm server at localhost:8000")
+    else:
+        print("Starting optillm server for integration tests...")
         proc, port = start_test_server()
         print(f"optillm server started successfully on port {port}")
+    try:
+        get_test_client(f"http://localhost:{port}/v1").chat.completions.create(
+            model=TEST_MODEL, messages=[{"role": "user", "content": "hi"}], max_tokens=1
+        )
         yield {"proc": proc, "port": port}
-    except Exception as e:
-        print(f"Failed to start optillm server: {e}")
-        raise
     finally:
         if proc:
             print("Stopping optillm server...")
