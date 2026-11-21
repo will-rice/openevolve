@@ -38,8 +38,8 @@ These tests:
 
 For slow tests that require LLM inference:
 
-1. **Install optillm**: `pip install optillm`
-2. **Start server**: `OPTILLM_API_KEY=optillm optillm --model google/gemma-3-270m-it --port 8000`
+1. **Install optillm**: `uv sync --extra dev` (the dev extra carries optillm and math-verify, which optillm imports without declaring)
+2. **Start server**: `OPTILLM_API_KEY=optillm OPTILLM_MAX_TOKENS=256 uv run --extra dev optillm --model codelion/dhara-250m --port 8000`
 3. **Set environment**: `export OPTILLM_API_KEY=optillm OPENAI_API_KEY=optillm`
 4. **Run tests**: `pytest tests/integration/ -m "slow"`
 
