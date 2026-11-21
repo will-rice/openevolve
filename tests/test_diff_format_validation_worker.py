@@ -53,11 +53,11 @@ class _WorkerTestBase(unittest.TestCase):
         self.sampler = MagicMock()
         self.sampler.build_prompt.return_value = {"system": "sys", "user": "usr"}
 
-    def _run(self, llm_response, llm_error=None):
+    def _run(self, llm_response, llm_error=None, usage=USAGE):
         self.llm_response = llm_response
         llm = MagicMock()
         llm.generate_with_context = AsyncMock(return_value=llm_response, side_effect=llm_error)
-        llm.last_usage = USAGE
+        llm.last_usage = usage
         llm.last_model = MODEL
         # Worker globals are only created in worker processes, hence create=True.
         with patch.multiple(
@@ -153,6 +153,31 @@ class TestWorkerLLMFailures(_WorkerTestBase):
         result = self._run(None)
         self._assert_keeps_context(result, "LLM returned None response")
         self.assertEqual(result.token_usage, USAGE)
+
+
+class TestWorkerTruncatedResponse(_WorkerTestBase):
+    """A response cut off at llm.max_tokens says so in the iteration error"""
+
+    CUT_OFF = dict(USAGE, finish_reason="length")
+
+    def test_cut_off_before_any_diff(self):
+        result = self._run("Plan: first I will", usage=self.CUT_OFF)
+        self.assertEqual(
+            result.error,
+            "No valid diffs found in response (response was cut off at llm.max_tokens)",
+        )
+        self.evaluator.evaluate_program.assert_not_called()
+
+    def test_cut_off_inside_a_diff(self):
+        result = self._run(VALID_BLOCK.replace(">>>>>>> REPLACE\n", ""), usage=self.CUT_OFF)
+        self.assertIn("(response was cut off at llm.max_tokens)", result.error)
+        self.evaluator.evaluate_program.assert_not_called()
+
+    def test_complete_response_error_is_unchanged(self):
+        result = self._run(
+            "I could not think of a change.", usage=dict(USAGE, finish_reason="stop")
+        )
+        self.assertEqual(result.error, "No valid diffs found in response")
 
 
 class TestWorkerRecordsModel(_WorkerTestBase):
@@ -272,6 +297,24 @@ class TestWorkerEnforceEvolveBlocks(_WorkerTestBase):
         config = Config.from_dict({"enforce_evolve_blocks": True})
         self.assertTrue(config.enforce_evolve_blocks)
         self.assertTrue(config.to_dict()["enforce_evolve_blocks"])
+
+
+class TestWorkerCountsEvaluatorUsage(_WorkerTestBase):
+    """The evaluator's LLM feedback calls are added to the iteration's token usage"""
+
+    def test_evaluator_usage_is_added(self):
+        self.evaluator.llm_ensemble.take_usage.return_value = {
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "total_tokens": 8,
+            "calls": 2,
+        }
+        result = self._run(VALID_BLOCK)
+        self.assertIsNone(result.error)
+        self.assertEqual(
+            result.token_usage,
+            {"prompt_tokens": 16, "completion_tokens": 10, "total_tokens": 26, "calls": 3},
+        )
 
 
 if __name__ == "__main__":

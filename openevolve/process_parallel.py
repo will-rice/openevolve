@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.injection import ChildInjector, InjectedChild
+from openevolve.llm.ensemble import add_usage, take_usage
 from openevolve.selection import IslandSelectionContext, IslandSelector, IslandState
 from openevolve.utils.logging_utils import console_handler
 from openevolve.utils.metrics_utils import safe_numeric_average
@@ -324,6 +325,8 @@ def _run_iteration(
 
         def _reject(error: str) -> SerializableResult:
             """A failed iteration that still carries what the LLM was asked and answered"""
+            if token_usage and token_usage.get("finish_reason") == "length":
+                error += " (response was cut off at llm.max_tokens)"
             return SerializableResult(
                 error=error,
                 iteration=iteration,
@@ -533,6 +536,11 @@ def _evaluate_child(
     child_metrics = _run_worker_async(
         _worker_evaluator.evaluate_program(child_code, child_id, child_context)
     )
+    # The evaluator's own LLM calls (use_llm_feedback) are part of this iteration's usage
+    evaluator_llm = getattr(_worker_evaluator, "llm_ensemble", None)
+    token_usage = add_usage(token_usage, take_usage(evaluator_llm))
+    if "token_usage" in metadata:
+        metadata = {**metadata, "token_usage": token_usage}
 
     # Get artifacts
     artifacts = _worker_evaluator.get_pending_artifacts(child_id)
@@ -966,14 +974,14 @@ class ProcessParallelController:
                 result = future.result(timeout=timeout_seconds)
 
                 token_str = ""
-                if result.token_usage:
+                if isinstance(result.token_usage, dict):
                     pt = result.token_usage.get("prompt_tokens", 0)
                     ct = result.token_usage.get("completion_tokens", 0)
                     tt = result.token_usage.get("total_tokens", 0)
                     total_prompt_tokens += pt
                     total_completion_tokens += ct
                     total_tokens += tt
-                    total_llm_calls += 1
+                    total_llm_calls += result.token_usage.get("calls", 1)
                     token_str = f" | tokens: {tt} (prompt: {pt}, completion: {ct})"
 
                 if result.error:
@@ -1008,6 +1016,13 @@ class ProcessParallelController:
                         iteration=completed_iteration,
                         target_island=result.target_island,
                     )
+                    # The novelty judge calls its LLM inside add(), in this process
+                    novelty_usage = take_usage(getattr(self.database, "novelty_llm", None))
+                    if novelty_usage:
+                        total_prompt_tokens += novelty_usage["prompt_tokens"]
+                        total_completion_tokens += novelty_usage["completion_tokens"]
+                        total_tokens += novelty_usage["total_tokens"]
+                        total_llm_calls += novelty_usage["calls"]
                     if admitted_id is None:
                         raise _CandidateRejected(child_program.id)
                     admitted = True

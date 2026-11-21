@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
 
 import openai
 
@@ -64,6 +65,7 @@ class OpenAILLM(LLMInterface):
         self.random_seed = getattr(model_cfg, "random_seed", None)
         self.reasoning_effort = getattr(model_cfg, "reasoning_effort", None)
         self.last_usage: Optional[Dict[str, Any]] = None
+        self._seed_skip_logged = False
 
         # Manual mode: enabled via llm.manual_mode in config.yaml
         self.manual_mode = (getattr(model_cfg, "manual_mode", False) is True)
@@ -172,11 +174,15 @@ class OpenAILLM(LLMInterface):
         # Seed only makes sense for actual API calls
         seed = kwargs.get("seed", self.random_seed)
         if seed is not None and not self.manual_mode:
-            if self.api_base == "https://generativelanguage.googleapis.com/v1beta/openai/":
-                logger.warning(
-                    "Skipping seed parameter as Google AI Studio endpoint doesn't support it. "
-                    "Reproducibility may be limited."
-                )
+            if urlparse(self.api_base or "").hostname == "generativelanguage.googleapis.com":
+                if not self._seed_skip_logged:
+                    logger.warning(
+                        "Skipping seed parameter as Google AI Studio endpoint doesn't support it. "
+                        "Reproducibility may be limited."
+                    )
+                    self._seed_skip_logged = True
+            elif urlparse(self.api_base or "").hostname == "api.mistral.ai":
+                params["extra_body"] = {"random_seed": seed}
             else:
                 params["seed"] = seed
 
@@ -232,6 +238,15 @@ class OpenAILLM(LLMInterface):
         logger.debug(f"API parameters: {params}")
         logger.debug(f"API response: {response.choices[0].message.content}")
 
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        if finish_reason == "length":
+            limit = params.get("max_completion_tokens") or params.get("max_tokens")
+            logger.warning(
+                f"Response from {self.model} was cut off at the token limit "
+                f"(finish_reason=length, max_tokens={limit}). Thinking models count "
+                "reasoning tokens toward this limit; raise llm.max_tokens."
+            )
+
         usage = getattr(response, "usage", None)
         if usage is not None:
             prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -242,6 +257,7 @@ class OpenAILLM(LLMInterface):
                 "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
                 "model": str(self.model),
+                "finish_reason": finish_reason,
             }
             logger.info(
                 f"LLM Token Usage ({self.model}): "
@@ -253,7 +269,16 @@ class OpenAILLM(LLMInterface):
             self.last_usage = None
             logger.info(f"LLM Token Usage ({self.model}): usage info not returned by API")
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        # Mistral's API reasoning models return content as a list of typed
+        # chunks (thinking + text); keep only the text chunks
+        if isinstance(content, list):
+            content = "".join(
+                chunk["text"] for chunk in content if chunk.get("type") == "text"
+            )
+            if not content:
+                raise ValueError("API returned no text content in response chunks")
+        return content
 
     async def _manual_wait_for_answer(
         self, params: Dict[str, Any], timeout: Optional[Union[int, float]]

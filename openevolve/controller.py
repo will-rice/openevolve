@@ -16,9 +16,9 @@ from openevolve.config import Config, load_config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.evaluator import Evaluator
 from openevolve.evolution_trace import EvolutionTracer
+from openevolve.injection import ChildInjector
 from openevolve.llm.ensemble import LLMEnsemble
 from openevolve.population import PopulationStrategy
-from openevolve.injection import ChildInjector
 from openevolve.process_parallel import ProcessParallelController
 from openevolve.prompt.sampler import PromptSampler
 from openevolve.selection import IslandSelector
@@ -66,6 +66,7 @@ class OpenEvolve:
         self.child_injector = child_injector
         # A Config built in code never passes through Config.from_dict, so validate here too
         self.config.validate_evolution_mode()
+        self.config.resolve_system_message()
 
         # Set up output directory
         self.output_dir = output_dir or os.path.join(
