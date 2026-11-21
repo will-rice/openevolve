@@ -20,6 +20,8 @@ from openevolve.llm.claude_code import ClaudeCodeLLM, init_claude_code_client
 FAKE = Path(__file__).parent / "fake_claude_code.py"
 EDIT_TURN = Path(__file__).parent / "claude_code_edit_turn.jsonl"
 RATE_LIMITED_TURN = Path(__file__).parent / "claude_code_rate_limited_turn.jsonl"
+# A run there stopped by `--max-turns 2` after it edited program.py (2026-11-21).
+MAX_TURNS_TURN = Path(__file__).parent / "claude_code_max_turns_turn.jsonl"
 # The edit turn's final message.
 REPLY = "`program.py` now returns `x+2`. Output of the command:\n\n```\n3\n```"
 
@@ -105,6 +107,29 @@ class TestClaudeCodeLLM(unittest.TestCase):
             asyncio.run(llm.generate("p"))
 
         self.assertEqual(len(runs(self.log)), 2)
+
+    def test_a_writable_run_stopped_at_its_turn_limit_replies_with_its_file(self):
+        """The file the stopped run left is the reply; without reply_file it fails."""
+        program = "def f(x):\n    return x+2\n"
+        writable = ClaudeCodeLLM(
+            model_config(
+                self.log,
+                MAX_TURNS_TURN,
+                0,
+                program,
+                sandbox_mode="workspace-write",
+                workspace_root=str(self.root),
+                reply_file="program.py",
+            )
+        )
+
+        reply = asyncio.run(writable.generate("p", workspace_files={"program.py": "x\n"}))
+
+        self.assertEqual(reply, program)
+        self.assertIn("Reached maximum number of turns (2)", writable.last_message)
+        text_only = ClaudeCodeLLM(model_config(self.log, MAX_TURNS_TURN))
+        with self.assertRaisesRegex(RuntimeError, "failed: error_max_turns"):
+            asyncio.run(text_only.generate("p"))
 
     def test_a_run_without_progress_times_out_at_the_idle_limit(self):
         """Events restart idle_timeout; a run silent for longer fails."""

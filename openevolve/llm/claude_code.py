@@ -36,6 +36,10 @@ Notes:
   "success" (error_max_turns, error_during_execution, error_max_budget_usd, ...:
   SDKResultMessage, https://code.claude.com/docs/en/agent-sdk/typescript), fails
   the call.
+- A run stopped at its turn limit (`--max-turns` in claude_args; subtype
+  error_max_turns) completes the call when `reply_file` is set: the file it left is
+  the reply, and its message says it was stopped. Without reply_file it fails, as
+  it has no reply.
 - With `idle_timeout`, every event but `system/api_retry`, which Claude Code emits
   before it retries a failed request, restarts it: a server that keeps refusing is
   not progress.
@@ -57,6 +61,9 @@ logger = logging.getLogger(__name__)
 CLAUDE_CODE_PROVIDER_ID = "claude-code"
 # The stream-json event Claude Code emits before it retries a failed API request.
 API_RETRY = ("system", "api_retry")
+# The result subtype of a run stopped at `--max-turns` (is_error true, its errors
+# "Reached maximum number of turns (N)"; Claude Code 2.1.321, 2026-11-21).
+MAX_TURNS = "error_max_turns"
 
 
 class ClaudeCodeLLM(CodexAppServerLLM):
@@ -125,6 +132,14 @@ class ClaudeCodeLLM(CodexAppServerLLM):
                     idle_until = time.monotonic() + self.idle_timeout
                 if event.get("type") != "result":
                     continue
+                if event.get("subtype") == MAX_TURNS and self.reply_file is not None:
+                    # The reply is the file the run left, which a run stopped at its
+                    # turn limit leaves as much as one that ends by itself.
+                    message = f"Claude Code stopped at its turn limit: {event.get('errors')}"
+                    logger.warning(
+                        f"{message} on {self.backend}; its {self.reply_file} is the reply"
+                    )
+                    return message
                 if event.get("is_error") or event.get("subtype") != "success":
                     raise RuntimeError(
                         f"Claude Code turn on {self.backend} failed: {event.get('subtype')}: "
