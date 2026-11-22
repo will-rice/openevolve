@@ -152,6 +152,19 @@ class TestPromptSamplerComprehensive(unittest.TestCase):
         self.assertIsInstance(features, str)
         self.assertIn("approach to the problem", features)
 
+    def test_extract_unique_features_names_standout_metrics(self):
+        """A metric at or above 0.9, or at or below 0.3, is named with its value.
+
+        get_fragment formats the fragment itself, so its placeholders' values go
+        to it; formatting its result afterwards put "[Fragment formatting error:
+        'metric_name']" in every prompt with such an inspiration program.
+        """
+        program = {"id": "p", "metrics": {"robust": 1.0, "combined_score": 0.25}}
+        features = self.prompt_sampler._extract_unique_features(program)
+        self.assertIn("Excellent robust (1.000)", features)
+        self.assertIn("Alternative combined_score approach", features)
+        self.assertNotIn("Fragment formatting error", features)
+
     def test_build_prompt_with_all_optional_parameters(self):
         """Test build_prompt with all optional parameters including inspirations"""
         current_program = "def main(): pass"
