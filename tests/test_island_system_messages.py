@@ -100,6 +100,57 @@ class TestIslandSystemMessages(unittest.TestCase):
             Counter(["island two", "island one", "island two"]),
         )
 
+    def test_parallel_worker_fills_template_variables_when_it_builds_the_prompt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "full_rewrite_user.txt").write_text(
+                "Beat {entry_bar}.\n{evolution_history}\n", encoding="utf-8"
+            )
+            bars = iter(["100", "90"])
+            config = Config.from_dict(
+                {
+                    "diff_based_evolution": False,
+                    "database": {"num_islands": 1},
+                    "prompt": {"template_dir": directory},
+                }
+            )
+            config.prompt.template_variables = lambda: {"entry_bar": next(bars)}
+            config.language = "python"
+            parent = Program(
+                id="parent", code="x = 1", metrics={"combined_score": 0.5}, metadata={"island": 0}
+            )
+            database = ProgramDatabase(config.database)
+            database.add(parent)
+            controller = process_parallel.ProcessParallelController(
+                config, "evaluator.py", database
+            )
+            with (
+                patch.object(database, "sample_from_island", return_value=(parent, [])),
+                patch.object(controller, "executor") as executor,
+            ):
+                for iteration in range(2):
+                    controller._submit_iteration(iteration, island_id=0)
+            submitted = [call.args[1:] for call in executor.submit.call_args_list]
+            llm = MagicMock()
+            llm.generate_with_context = AsyncMock(return_value="x = 2")
+            with (
+                patch.object(process_parallel, "_lazy_init_worker_components"),
+                patch.multiple(
+                    process_parallel,
+                    create=True,
+                    _worker_config=config,
+                    _worker_prompt_sampler=PromptSampler(config.prompt),
+                    _worker_llm_ensemble=llm,
+                ),
+            ):
+                for args in submitted:
+                    process_parallel._run_iteration_worker(*args)
+
+        prompts = [
+            call.kwargs["messages"][0]["content"]
+            for call in llm.generate_with_context.call_args_list
+        ]
+        self.assertEqual([prompt.splitlines()[0] for prompt in prompts], ["Beat 100.", "Beat 90."])
+
     def test_checkpoint_resume_with_same_config_keeps_override(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.yaml"

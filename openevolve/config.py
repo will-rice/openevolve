@@ -346,6 +346,11 @@ class PromptConfig:
     num_top_programs: int = 3
     num_diverse_programs: int = 2
 
+    # Values filled into the user template beside the built-in ones, read when each
+    # prompt is built (in the worker that builds it), so a template can state what
+    # changes while the search runs. None: no extra values.
+    template_variables: Optional[Callable[[], Dict[str, str]]] = None
+
     # Template stochasticity
     use_template_stochasticity: bool = True
     template_variations: Dict[str, List[str]] = field(default_factory=dict)

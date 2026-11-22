@@ -317,6 +317,11 @@ def _run_iteration(
             feature_dimensions=db_snapshot.get("feature_dimensions", []),
             current_changes_description=parent_changes_desc,
             island_id=db_snapshot.get("sampling_island"),
+            **(
+                _worker_config.prompt.template_variables()
+                if _worker_config.prompt.template_variables
+                else {}
+            ),
         )
 
         iteration_start = time.time()
