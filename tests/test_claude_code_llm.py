@@ -4,11 +4,18 @@ Every call starts a real process: `claude_command` runs tests/fake_claude_code.p
 logs what it was given and prints a recorded run's stream-json:
 claude_code_edit_turn.jsonl, Claude Code 2.1.321 on deepseek-v4.1-flash behind an
 Anthropic-compatible endpoint editing program.py (2026-11-20), and
-claude_code_rate_limited_turn.jsonl, a run there that ended on the endpoint's 429.
+claude_code_rate_limited_turn.jsonl, a run there that ended on the endpoint's 429, and
+claude_code_refused_turn.jsonl, Claude Code 2.1.321 in dontAsk mode with
+permissions.blockReadsOutsideWorkingDirectories and an MCP server `qcc`, on a local
+Anthropic Messages server answering a fixed script (2026-11-22): a 429 it retried, a
+Bash call its permission layer refused, a Read outside its working directory, a Bash
+`cat` of a missing file, an MCP call that returned an error, a Read of a missing file,
+an Edit of program.py, an automatic compaction, then the final message.
 """
 
 import asyncio
 import json
+import logging
 import sys
 import tempfile
 import unittest
@@ -22,6 +29,7 @@ EDIT_TURN = Path(__file__).parent / "claude_code_edit_turn.jsonl"
 RATE_LIMITED_TURN = Path(__file__).parent / "claude_code_rate_limited_turn.jsonl"
 # A run there stopped by `--max-turns 2` after it edited program.py (2026-11-21).
 MAX_TURNS_TURN = Path(__file__).parent / "claude_code_max_turns_turn.jsonl"
+REFUSED_TURN = Path(__file__).parent / "claude_code_refused_turn.jsonl"
 # The edit turn's final message.
 REPLY = "`program.py` now returns `x+2`. Output of the command:\n\n```\n3\n```"
 
@@ -141,6 +149,127 @@ class TestClaudeCodeLLM(unittest.TestCase):
         silent = ClaudeCodeLLM(model_config(self.log, EDIT_TURN, 2, timeout=1, idle_timeout=1))
         with self.assertRaisesRegex(asyncio.TimeoutError, "made no progress for 1s"):
             asyncio.run(silent.generate("p"))
+
+    def test_a_turns_report_counts_its_requests_tools_refusals_and_retries(self):
+        """The report comes from the stream; it is logged and appended to the file."""
+        report_file = self.tmp / "turn_reports.jsonl"
+        llm = ClaudeCodeLLM(
+            model_config(
+                self.log,
+                REFUSED_TURN,
+                0,
+                "def f(x):\n    return x+2\n",
+                sandbox_mode="workspace-write",
+                workspace_root=str(self.root),
+                reply_file="program.py",
+                turn_report_file=str(report_file),
+            )
+        )
+
+        with self.assertLogs("openevolve.llm.claude_code", logging.INFO) as logs:
+            asyncio.run(llm.generate("p", workspace_files={"program.py": "x\n"}))
+
+        report = llm.last_turn_report
+        self.assertEqual(report.agent, "claude-code")
+        self.assertEqual(report.backend, "claude-code/deepseek-v4.1-flash")
+        self.assertEqual(report.requests, 7)
+        self.assertEqual(report.compactions, 1)
+        self.assertEqual(report.api_retries, {"429": 1})
+        self.assertEqual(report.tool_calls, {"Bash": 2, "Read": 2, "mcp__qcc__check": 1, "Edit": 1})
+        failures = report.tool_failures
+        self.assertEqual(
+            {reason: failures[reason].count for reason in failures},
+            {"permission": 1, "outside_workdirs": 1, "sandbox": 1, "other": 2},
+        )
+        [refused] = failures["permission"].examples
+        self.assertEqual(refused.tool, "Bash")
+        self.assertIn('"command": "ls /"', refused.input)
+        self.assertTrue(refused.error.startswith("Permission to use Bash has been denied"))
+        self.assertEqual(len(refused.error), 160)
+        self.assertEqual(failures["outside_workdirs"].examples[0].tool, "Read")
+        self.assertIn("missing_input.txt: No such file", failures["sandbox"].examples[0].error)
+        self.assertEqual(
+            [example.tool for example in failures["other"].examples], ["mcp__qcc__check", "Read"]
+        )
+        self.assertTrue(report.reply_changed)
+        self.assertEqual(report.end, "completed")
+        self.assertIsNone(report.error)
+        self.assertIn(f"turn report: {report.to_json()}", logs.output[-1])
+        self.assertEqual(report_file.read_text(), report.to_json() + "\n")
+
+    def test_a_turn_that_left_its_reply_file_reports_it_unchanged(self):
+        """The fake writes no program: the reply file is as the call wrote it."""
+        llm = ClaudeCodeLLM(
+            model_config(
+                self.log,
+                EDIT_TURN,
+                sandbox_mode="workspace-write",
+                workspace_root=str(self.root),
+                reply_file="program.py",
+            )
+        )
+
+        reply = asyncio.run(llm.generate("p", workspace_files={"program.py": "x\n"}))
+
+        report = llm.last_turn_report
+        self.assertEqual(reply, "x\n")
+        self.assertFalse(report.reply_changed)
+        self.assertEqual(report.requests, 4)
+        self.assertEqual(report.tool_calls, {"Read": 1, "Edit": 1, "Bash": 1})
+        self.assertEqual(report.tool_failures, {})
+        self.assertEqual(report.end, "completed")
+
+    def test_a_failed_turns_report_is_set_and_written_before_it_raises(self):
+        """Each attempt, retried or not, writes its report; the last is on the LLM."""
+        report_file = self.tmp / "turn_reports.jsonl"
+        llm = ClaudeCodeLLM(
+            model_config(self.log, RATE_LIMITED_TURN, retries=1, turn_report_file=str(report_file))
+        )
+
+        with self.assertRaises(RuntimeError):
+            asyncio.run(llm.generate("p"))
+
+        report = llm.last_turn_report
+        self.assertEqual(report.end, "failed")
+        self.assertTrue(report.error.startswith("success: API Error: Request rejected (429)"))
+        self.assertEqual(report.api_retries, {"429": 1})
+        # The run's own "<synthetic>" message for the failed request is not a request.
+        self.assertEqual(report.requests, 1)
+        self.assertIsNone(report.reply_changed)
+        lines = report_file.read_text().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[-1], report.to_json())
+
+    def test_a_turn_stopped_at_its_turn_limit_reports_max_turns(self):
+        """With or without reply_file, the end is max_turns."""
+        writable = ClaudeCodeLLM(
+            model_config(
+                self.log,
+                MAX_TURNS_TURN,
+                0,
+                "def f(x):\n    return x+2\n",
+                sandbox_mode="workspace-write",
+                workspace_root=str(self.root),
+                reply_file="program.py",
+            )
+        )
+        asyncio.run(writable.generate("p", workspace_files={"program.py": "x\n"}))
+        self.assertEqual(writable.last_turn_report.end, "max_turns")
+        self.assertTrue(writable.last_turn_report.reply_changed)
+        self.assertEqual(writable.last_turn_report.requests, 2)
+
+        text_only = ClaudeCodeLLM(model_config(self.log, MAX_TURNS_TURN))
+        with self.assertRaises(RuntimeError):
+            asyncio.run(text_only.generate("p"))
+        self.assertEqual(text_only.last_turn_report.end, "max_turns")
+        self.assertIn("Reached maximum number of turns (2)", text_only.last_turn_report.error)
+
+    def test_a_turn_without_progress_reports_its_idle_timeout(self):
+        silent = ClaudeCodeLLM(model_config(self.log, EDIT_TURN, 2, timeout=1, idle_timeout=1))
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(silent.generate("p"))
+        self.assertEqual(silent.last_turn_report.end, "idle_timeout")
+        self.assertGreaterEqual(silent.last_turn_report.wall_seconds, 1)
 
     def test_factory_function(self):
         llm = init_claude_code_client(LLMModelConfig(name="sonnet"))

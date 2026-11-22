@@ -199,6 +199,7 @@ def _make_cfg(**overrides):
         "context_window": None,
         "idle_timeout": None,
         "turn_timeout": None,
+        "turn_report_file": None,
         "init_client": None,
         "provider": None,
     }

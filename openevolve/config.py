@@ -146,6 +146,11 @@ class LLMModelConfig:
     # a turn that keeps progressing has none
     turn_timeout: Optional[int] = None
 
+    # Codex app-server and Claude Code CLI: when set, a file each turn appends its
+    # TurnReport to as one JSON line (openevolve/llm/turn_report.py), beside the
+    # `turn report: ...` log line
+    turn_report_file: Optional[str] = None
+
     # Codex app-server: the model's context window in tokens, sent as the thread's
     # model_context_window; codex compacts at 90% of it. Codex's own value for the
     # model when unset (272,000 for a model it does not know)

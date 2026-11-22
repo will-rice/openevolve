@@ -44,16 +44,27 @@ Notes:
   before it retries a failed request, restarts it: a server that keeps refusing is
   not progress.
 - `last_backend` is "claude-code/<model>".
+- The turn's TurnReport (openevolve/llm/turn_report.py; `last_turn_report`,
+  `turn_report_file`, as for codex) comes from the stream: `requests` counts the
+  assistant messages by unique message id, without Claude Code's own "<synthetic>"
+  message for a request that failed (its compaction's summary request is not in the
+  stream, and so not counted); `compactions` counts `system/compact_boundary`
+  events; `tool_calls` counts the `tool_use` blocks by name; a `tool_result` with
+  is_error is a tool failure, classified by its text; `api_retries` counts the
+  `system/api_retry` events by error_status. Shapes from a recorded Claude Code
+  2.1.321 run (tests/claude_code_refused_turn.jsonl) and its SDK schema.
 """
 
 import asyncio
+import json
 import logging
 import math
 import subprocess
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from openevolve.llm.codex_app_server import CodexAppServerLLM, _AppServerSession, _cfg_value
+from openevolve.llm.turn_report import ERROR_CHARS, TurnReport, failure_reason
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +75,14 @@ API_RETRY = ("system", "api_retry")
 # The result subtype of a run stopped at `--max-turns` (is_error true, its errors
 # "Reached maximum number of turns (N)"; Claude Code 2.1.321, 2026-11-21).
 MAX_TURNS = "error_max_turns"
+# The stream-json event Claude Code emits once it compacted the conversation
+# (SDKCompactBoundaryMessage).
+COMPACT_BOUNDARY = ("system", "compact_boundary")
+# The model of the assistant message Claude Code writes itself for a request that
+# failed ("API Error: ..."), which no model sent.
+SYNTHETIC_MODEL = "<synthetic>"
+# The tool that runs shell commands, whose file system errors are "sandbox" failures.
+SHELL_TOOL = "Bash"
 
 
 class ClaudeCodeLLM(CodexAppServerLLM):
@@ -71,6 +90,9 @@ class ClaudeCodeLLM(CodexAppServerLLM):
 
     Requires the `claude` CLI, logged in or pointed at an endpoint with a key.
     """
+
+    # The agent its TurnReports name.
+    agent = CLAUDE_CODE_PROVIDER_ID
 
     def __init__(self, model_cfg=None):
         super().__init__(model_cfg)
@@ -96,7 +118,10 @@ class ClaudeCodeLLM(CodexAppServerLLM):
             *self.claude_args,
         ]
 
-    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str]) -> str:
+    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str], report: TurnReport) -> str:
+        # The assistant message ids seen, and each tool_use's name and input by id.
+        messages: Set[str] = set()
+        calls: Dict[str, Tuple[str, str]] = {}
         proc = subprocess.Popen(
             self._build_command(),
             stdin=subprocess.PIPE,
@@ -121,30 +146,61 @@ class ClaudeCodeLLM(CodexAppServerLLM):
                     event = session.next_message(min(deadline, idle_until))
                 except asyncio.TimeoutError:
                     if idle_until < deadline:
+                        report.end = "idle_timeout"
                         raise asyncio.TimeoutError(
                             f"Claude Code turn on {self.backend} made no progress for "
                             f"{self.idle_timeout}s"
                         ) from None
                     raise
-                if (event.get("type"), event.get("subtype")) == API_RETRY:
+                kind = (event.get("type"), event.get("subtype"))
+                if kind == API_RETRY:
                     logger.warning(f"Claude Code on {self.backend} retries a request: {event}")
+                    report.add_api_retry(str(event["error_status"]))
                 elif self.idle_timeout is not None:
                     idle_until = time.monotonic() + self.idle_timeout
+                if kind == COMPACT_BOUNDARY:
+                    report.compactions += 1
+                elif event.get("type") == "assistant":
+                    reply = event["message"]
+                    if reply["model"] != SYNTHETIC_MODEL and reply["id"] not in messages:
+                        messages.add(reply["id"])
+                        report.requests += 1
+                    for block in reply["content"]:
+                        if block["type"] == "tool_use" and block["id"] not in calls:
+                            calls[block["id"]] = (block["name"], json.dumps(block["input"]))
+                            report.add_tool_call(block["name"])
+                elif event.get("type") == "user":
+                    content = event["message"]["content"]
+                    # A plain-text user message has no tool results.
+                    for block in content if isinstance(content, list) else []:
+                        if block["type"] != "tool_result" or not block.get("is_error"):
+                            continue
+                        # The result's content: a string, or text (and other) blocks.
+                        error = block["content"]
+                        if isinstance(error, list):
+                            error = "\n".join(b["text"] for b in error if b["type"] == "text")
+                        tool, call_input = calls[block["tool_use_id"]]
+                        reason = failure_reason(tool == SHELL_TOOL, error)
+                        report.add_tool_failure(reason, tool, call_input, error)
                 if event.get("type") != "result":
                     continue
-                if event.get("subtype") == MAX_TURNS and self.reply_file is not None:
-                    # The reply is the file the run left, which a run stopped at its
-                    # turn limit leaves as much as one that ends by itself.
-                    message = f"Claude Code stopped at its turn limit: {event.get('errors')}"
-                    logger.warning(
-                        f"{message} on {self.backend}; its {self.reply_file} is the reply"
-                    )
-                    return message
+                if event.get("subtype") == MAX_TURNS:
+                    report.end = "max_turns"
+                    if self.reply_file is not None:
+                        # The reply is the file the run left, which a run stopped at
+                        # its turn limit leaves as much as one that ends by itself.
+                        message = f"Claude Code stopped at its turn limit: {event.get('errors')}"
+                        logger.warning(
+                            f"{message} on {self.backend}; its {self.reply_file} is the reply"
+                        )
+                        return message
                 if event.get("is_error") or event.get("subtype") != "success":
-                    raise RuntimeError(
-                        f"Claude Code turn on {self.backend} failed: {event.get('subtype')}: "
-                        f"{event.get('result') or event.get('errors')}"
-                    )
+                    error = f"{event.get('subtype')}: {event.get('result') or event.get('errors')}"
+                    if report.end is None:
+                        report.end = "failed"
+                    report.error = error[:ERROR_CHARS]
+                    raise RuntimeError(f"Claude Code turn on {self.backend} failed: {error}")
+                report.end = "completed"
                 text = event.get("result") or ""
                 logger.info(
                     f"Claude Code turn on {self.backend} completed in "

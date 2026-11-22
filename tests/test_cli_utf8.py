@@ -22,6 +22,7 @@ case = sys.argv[1]
 
 if case in ('claude_output', 'claude_input'):
     from openevolve.llm.claude_code import ClaudeCodeLLM
+    from openevolve.llm.turn_report import TurnReport
     model = ClaudeCodeLLM()
     # A stream-json result event whose text is stdin's (claude_input) or `text`.
     source = 'sys.stdin.buffer.read().decode()' if case == 'claude_input' else ascii(text)
@@ -29,7 +30,8 @@ if case in ('claude_output', 'claude_input'):
                '{"type": "result", "subtype": "success", "is_error": False, "result": '
                + source + '}, ensure_ascii=False) + chr(10)).encode("utf-8"))']
     with patch.object(model, '_build_command', return_value=command):
-        result = model._run_turn(text, timeout=5, cwd=None)
+        report = TurnReport(model.agent, model.backend)
+        result = model._run_turn(text, timeout=5, cwd=None, report=report)
 elif case == 'copilot_output':
     from openevolve.llm.copilot_cli import CopilotCLILLM
     result = CopilotCLILLM()._run_cli(command, timeout=5)

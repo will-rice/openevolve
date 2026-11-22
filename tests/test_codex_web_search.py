@@ -44,7 +44,8 @@ class TestWebSearch(unittest.TestCase):
         self.assertIn(
             "Codex turn on openai/gpt-test completed with 1 web searches: "
             "['https://news.ycombinator.com/']",
-            logs.output[-1],
+            # The line before the turn report, the turn's last.
+            logs.output[-2],
         )
 
 

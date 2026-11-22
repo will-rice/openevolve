@@ -86,6 +86,20 @@ Notes:
   cannot run. `context_window` sets the thread's `model_context_window`, which a
   model codex does not know needs (its fallback is 272,000 tokens,
   models-manager/src/model_info.rs:99-130).
+- Each turn's TurnReport (openevolve/llm/turn_report.py) is logged at its end, kept
+  as `last_turn_report` (set on a turn that raised too, before the call raises) and,
+  with `turn_report_file`, appended to that file. From the turn's notifications:
+  `requests` counts the `thread/tokenUsage/updated` notifications that raise the
+  thread's total tokens, one per model response codex received, its compaction's
+  included (codex repeats an update unchanged, and sends one with its compaction:
+  a recorded turn of 7 responses sent 9); `compactions` counts `contextCompaction`
+  items; `tool_calls` counts the completed commandExecution, fileChange, webSearch
+  and mcpToolCall (as mcp__<server>__<tool>) items; a failed or declined one is a
+  tool failure, declined as "permission"; `api_retries` counts the `error`
+  notifications codex retries itself (willRetry), by codexErrorInfo's kind. A
+  command codex's sandbox refused leaves no item at all in codex 0.161.0 (its
+  model saw "Read-only file system"; the app-server sent no commandExecution), so
+  such refusals are missing from the report.
 - The stdio transport is unsupported on Windows; the backend expects a POSIX
   shell there.
 """
@@ -105,6 +119,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 
 from openevolve.llm.base import LLMInterface
+from openevolve.llm.turn_report import ERROR_CHARS, TurnReport, failure_reason
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +176,12 @@ PROGRESS_METHODS = frozenset(
         "item/reasoning/textDelta",
     )
 )
+
+# The TurnReport agent of this provider's turns.
+CODEX_AGENT = "codex"
+# The ThreadItem types that are tool calls, counted in a TurnReport
+# (codex app-server generate-ts, v2/ThreadItem.ts, codex-cli 0.161.0).
+TOOL_ITEM_TYPES = ("commandExecution", "fileChange", "mcpToolCall", "webSearch")
 
 _CLIENT_INFO = {"name": "openevolve", "title": "OpenEvolve", "version": "1.0.0"}
 
@@ -339,6 +360,9 @@ class CodexAppServerLLM(LLMInterface):
     account (the app-server manages that login and token refresh itself).
     """
 
+    # The agent its TurnReports name.
+    agent = CODEX_AGENT
+
     def __init__(self, model_cfg=None):
         self.model = _cfg_value(model_cfg, "name", "gpt-5.3-codex")
         self.system_message = getattr(model_cfg, "system_message", None)
@@ -356,6 +380,7 @@ class CodexAppServerLLM(LLMInterface):
         self.context_window = getattr(model_cfg, "context_window", None)
         self.idle_timeout = getattr(model_cfg, "idle_timeout", None)
         self.turn_timeout = getattr(model_cfg, "turn_timeout", None)
+        self.turn_report_file = getattr(model_cfg, "turn_report_file", None)
         if self.idle_timeout is not None and self.idle_timeout <= 0:
             raise ValueError(f"idle_timeout must be positive, not {self.idle_timeout}")
         if self.turn_timeout is not None and (self.idle_timeout is None or self.turn_timeout <= 0):
@@ -373,6 +398,8 @@ class CodexAppServerLLM(LLMInterface):
         self.last_message: Optional[str] = None
         # "<provider id>/<model>" of the latest turn that completed (`backend`).
         self.last_backend: Optional[str] = None
+        # What the latest turn did, set whether or not it completed.
+        self.last_turn_report: Optional[TurnReport] = None
         if self.web_search is not None and self.web_search not in VALID_WEB_SEARCH_MODES:
             raise ValueError(
                 f"Invalid web_search: {self.web_search}. "
@@ -518,26 +545,61 @@ class CodexAppServerLLM(LLMInterface):
         return [*self.codex_command, "app-server"]
 
     def _run_app_server(self, prompt: str, timeout: int, files: Dict[str, str]) -> str:
-        """Run one turn, in a fresh workspace holding `files` when one is configured."""
+        """Run one turn, in a fresh workspace holding `files` when one is configured.
+
+        The turn's TurnReport is `last_turn_report` from its start, and is logged and
+        written to `turn_report_file` at its end, whether it completed or raised.
+        """
         self.last_message = None
         self.last_backend = None
-        if self.workspace_root is None:
-            self.last_message = self._run_turn(prompt, timeout, None)
-            self.last_backend = self.backend
-            return self.last_message
-        with tempfile.TemporaryDirectory(dir=self.workspace_root) as workspace:
-            for name, text in files.items():
-                # newline="": the program's bytes as written, CRLF included.
-                with open(os.path.join(workspace, name), "w", encoding="utf-8", newline="") as f:
-                    f.write(text)
-            # Returns only once the turn completed; a timeout or a failed turn raises
-            # first, so a half-edited reply_file is never read.
-            message = self._run_turn(prompt, timeout, workspace)
-            self.last_message = message
-            self.last_backend = self.backend
-            if self.reply_file is None:
-                return message
-            return self._read_reply_file(os.path.join(workspace, self.reply_file))
+        report = TurnReport(agent=self.agent, backend=self.backend)
+        self.last_turn_report = report
+        start = time.monotonic()
+        try:
+            if self.workspace_root is None:
+                self.last_message = self._run_turn(prompt, timeout, None, report)
+                self.last_backend = self.backend
+                return self.last_message
+            with tempfile.TemporaryDirectory(dir=self.workspace_root) as workspace:
+                for name, text in files.items():
+                    # newline="": the program's bytes as written, CRLF included.
+                    with open(
+                        os.path.join(workspace, name), "w", encoding="utf-8", newline=""
+                    ) as f:
+                        f.write(text)
+                reply_path = (
+                    None if self.reply_file is None else os.path.join(workspace, self.reply_file)
+                )
+                try:
+                    # Returns only once the turn completed; a timeout or a failed turn
+                    # raises first, so a half-edited reply_file is never read.
+                    message = self._run_turn(prompt, timeout, workspace, report)
+                finally:
+                    if reply_path is not None:
+                        # Bytes, so a file the turn left that is not UTF-8 compares too;
+                        # None: no such file, before or after the turn.
+                        written = files.get(self.reply_file)
+                        before = None if written is None else written.encode("utf-8")
+                        after = None
+                        if os.path.exists(reply_path):
+                            with open(reply_path, "rb") as f:
+                                after = f.read()
+                        report.reply_changed = after != before
+                self.last_message = message
+                self.last_backend = self.backend
+                if reply_path is None:
+                    return message
+                return self._read_reply_file(reply_path)
+        except asyncio.TimeoutError:
+            if report.end is None:
+                report.end = "timeout"
+            raise
+        finally:
+            if report.end is None:
+                report.end = "aborted"
+            report.wall_seconds = round(time.monotonic() - start, 1)
+            # The provider's own logger: a subclass's module's, not this one's.
+            report.emit(logging.getLogger(type(self).__module__), self.turn_report_file)
 
     def _read_reply_file(self, path: str) -> str:
         """The completed turn's `reply_file`, byte for byte, as the reply."""
@@ -555,7 +617,7 @@ class CodexAppServerLLM(LLMInterface):
             )
         return text
 
-    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str]) -> str:
+    def _run_turn(self, prompt: str, timeout: int, cwd: Optional[str], report: TurnReport) -> str:
         deadline = time.monotonic() + timeout
         session = self._start_session(cwd)
         try:
@@ -611,7 +673,7 @@ class CodexAppServerLLM(LLMInterface):
                 deadline = time.monotonic() + (
                     math.inf if self.turn_timeout is None else self.turn_timeout
                 )
-            return self._collect_response(session, deadline)
+            return self._collect_response(session, deadline, report)
         finally:
             session.close()
 
@@ -632,13 +694,18 @@ class CodexAppServerLLM(LLMInterface):
                 "keep the default OpenAI provider."
             )
 
-    def _collect_response(self, session: _AppServerSession, deadline: float) -> str:
+    def _collect_response(
+        self, session: _AppServerSession, deadline: float, report: TurnReport
+    ) -> str:
         """Stream notifications until the turn finishes; return the agent message.
 
         The agent text arrives as `item/completed` notifications
-        (`item.type == "agentMessage"`); `turn/completed` closes the turn.
+        (`item.type == "agentMessage"`); `turn/completed` closes the turn. What the
+        turn did goes into `report`.
         """
         text: Optional[str] = None
+        # The thread's total tokens so far: an update that raises it is a response.
+        total_tokens = 0
         # The queries of the turn's web searches (WebSearchThreadItem.query), logged
         # when it completes so a caller can see whether and how the model searched.
         searches: List[str] = []
@@ -650,6 +717,7 @@ class CodexAppServerLLM(LLMInterface):
                 try:
                     message = session.next_message(idle_until)
                 except asyncio.TimeoutError:
+                    report.end = "idle_timeout"
                     raise asyncio.TimeoutError(
                         f"codex turn on {self.backend} made no progress for "
                         f"{self.idle_timeout}s"
@@ -666,12 +734,26 @@ class CodexAppServerLLM(LLMInterface):
                 item = params.get("item") or {}
                 if item.get("type") == "agentMessage":
                     text = item.get("text") or ""
-                elif item.get("type") == "webSearch":
-                    searches.append(item["query"])
+                elif item.get("type") == "contextCompaction":
+                    report.compactions += 1
+                elif item.get("type") in TOOL_ITEM_TYPES:
+                    report_tool_item(report, item)
+                    if item["type"] == "webSearch":
+                        searches.append(item["query"])
+            elif method == "thread/tokenUsage/updated":
+                total = params["tokenUsage"]["total"]["totalTokens"]
+                if total > total_tokens:
+                    report.requests += 1
+                    total_tokens = total
             elif method == "turn/completed":
-                status = (params.get("turn") or {}).get("status")
+                turn = params.get("turn") or {}
+                status = turn.get("status")
                 if status and status != "completed":
+                    report.end = "interrupted" if status == "interrupted" else "failed"
+                    error = turn.get("error")
+                    report.error = (status if error is None else error["message"])[:ERROR_CHARS]
                     raise RuntimeError(f"codex app-server turn did not complete: {status}")
+                report.end = "completed"
                 logger.info(
                     f"Codex turn on {self.backend} completed with {len(searches)} web "
                     f"searches: {searches}"
@@ -683,7 +765,12 @@ class CodexAppServerLLM(LLMInterface):
                 error = params["error"]
                 if params["willRetry"]:
                     logger.warning(f"codex retries after a transient error: {error}")
+                    # CodexErrorInfo: a kind ("other") or {kind: details}; None unset.
+                    info = error["codexErrorInfo"]
+                    report.add_api_retry(next(iter(info)) if isinstance(info, dict) else str(info))
                     continue
+                report.end = "failed"
+                report.error = error["message"][:ERROR_CHARS]
                 if error.get("codexErrorInfo") == USAGE_LIMIT_EXCEEDED:
                     raise CodexUsageLimitError(error["message"])
                 raise RuntimeError(f"codex app-server reported an error: {params}")
@@ -705,6 +792,36 @@ class CodexAppServerLLM(LLMInterface):
             cwd=cwd,
         )
         return _AppServerSession(proc)
+
+
+def report_tool_item(report: TurnReport, item: Dict[str, Any]) -> None:
+    """Count a completed tool-call ThreadItem (TOOL_ITEM_TYPES) in `report`.
+
+    A commandExecution or fileChange whose status is "declined" is a "permission"
+    failure; a failed one, or a failed mcpToolCall, is classified by its output or
+    error (failure_reason). A webSearch has no status.
+    """
+    kind = item["type"]
+    if kind == "mcpToolCall":
+        tool = f"mcp__{item['server']}__{item['tool']}"
+        call_input = json.dumps(item["arguments"])
+        # A tool that ran and failed has a result; one codex refused, an error.
+        error = json.dumps(item["result"]) if item["error"] is None else item["error"]["message"]
+    elif kind == "commandExecution":
+        tool, call_input = kind, item["command"]
+        error = item["aggregatedOutput"] or f"exit code {item['exitCode']}"
+    elif kind == "fileChange":
+        tool, call_input = kind, " ".join(change["path"] for change in item["changes"])
+        error = f"patch {item['status']}"
+    else:
+        tool, call_input, error = kind, item["query"], ""
+    report.add_tool_call(tool)
+    status = item.get("status")
+    if status == "declined":
+        report.add_tool_failure("permission", tool, call_input, error)
+    elif status == "failed":
+        reason = failure_reason(kind == "commandExecution", error)
+        report.add_tool_failure(reason, tool, call_input, error)
 
 
 def init_codex_app_server_client(model_cfg):
