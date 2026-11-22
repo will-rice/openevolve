@@ -37,8 +37,9 @@ Notes:
   SDKResultMessage, https://code.claude.com/docs/en/agent-sdk/typescript), fails
   the call.
 - A run stopped at its turn limit (`--max-turns` in claude_args; subtype
-  error_max_turns) completes the call when `reply_file` is set: the file it left is
-  the reply, and its message says it was stopped. Without reply_file it fails, as
+  error_max_turns), or one stopped at `turn_timeout`, completes the call when
+  `reply_file` is set: the file it left is the reply, and its message says it was
+  stopped. Without reply_file it fails, as
   it has no reply.
 - With `idle_timeout`, every event but `system/api_retry`, which Claude Code emits
   before it retries a failed request, restarts it: a server that keeps refusing is
@@ -151,6 +152,15 @@ class ClaudeCodeLLM(CodexAppServerLLM):
                             f"Claude Code turn on {self.backend} made no progress for "
                             f"{self.idle_timeout}s"
                         ) from None
+                    report.end = "timeout"
+                    if self.reply_file is not None:
+                        # Past turn_timeout, a run is stopped (session.close) and the
+                        # file it left is the reply, as at its turn limit.
+                        message = f"Claude Code stopped at its turn timeout ({self.turn_timeout}s)"
+                        logger.warning(
+                            f"{message} on {self.backend}; its {self.reply_file} is the reply"
+                        )
+                        return message
                     raise
                 kind = (event.get("type"), event.get("subtype"))
                 if kind == API_RETRY:

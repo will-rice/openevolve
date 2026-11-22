@@ -264,6 +264,33 @@ class TestClaudeCodeLLM(unittest.TestCase):
         self.assertEqual(text_only.last_turn_report.end, "max_turns")
         self.assertIn("Reached maximum number of turns (2)", text_only.last_turn_report.error)
 
+    def test_a_writable_run_past_its_turn_timeout_replies_with_its_file(self):
+        """Past turn_timeout a progressing run is stopped; the file it left is the reply.
+
+        Events every 0.4 s keep the idle timeout from firing; the 1 s turn timeout ends
+        the run. Without reply_file the timeout fails the call.
+        """
+        program = "def f(x):\n    return x+3\n"
+        writable = ClaudeCodeLLM(
+            model_config(
+                self.log, EDIT_TURN, 0.4, program,
+                timeout=30, idle_timeout=30, turn_timeout=1,
+                sandbox_mode="workspace-write", workspace_root=str(self.root),
+                reply_file="program.py",
+            )
+        )  # fmt: skip
+
+        reply = asyncio.run(writable.generate("p", workspace_files={"program.py": "x\n"}))
+
+        self.assertEqual(reply, program)
+        self.assertIn("turn timeout", writable.last_message)
+        self.assertEqual(writable.last_turn_report.end, "timeout")
+        text_only = ClaudeCodeLLM(
+            model_config(self.log, EDIT_TURN, 0.4, timeout=30, idle_timeout=30, turn_timeout=1)
+        )
+        with self.assertRaises(asyncio.TimeoutError):
+            asyncio.run(text_only.generate("p"))
+
     def test_a_turn_without_progress_reports_its_idle_timeout(self):
         silent = ClaudeCodeLLM(model_config(self.log, EDIT_TURN, 2, timeout=1, idle_timeout=1))
         with self.assertRaises(asyncio.TimeoutError):
