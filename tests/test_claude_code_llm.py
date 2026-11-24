@@ -187,9 +187,7 @@ class TestClaudeCodeLLM(unittest.TestCase):
         self.assertTrue(refused.error.startswith("Permission to use Bash has been denied"))
         self.assertEqual(len(refused.error), 160)
         self.assertEqual(failures["outside_workdirs"].examples[0].tool, "Read")
-        self.assertIn(
-            "missing_input.txt: No such file", failures["missing_file"].examples[0].error
-        )
+        self.assertIn("missing_input.txt: No such file", failures["missing_file"].examples[0].error)
         self.assertEqual(
             [example.tool for example in failures["other"].examples], ["mcp__qcc__check", "Read"]
         )
