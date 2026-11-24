@@ -912,8 +912,11 @@ class ProcessParallelController:
                             island_pending[island_id].append(current_iteration)
                         current_iteration += 1
         else:
-            # Keep the original initial batch size, but let the policy place each task.
-            initial_slots = min(max_iterations, batch_per_island * self.num_islands)
+            # Queue only the workers' batch: a task's parent and database snapshot are
+            # fixed when it is queued, so one task per island (32 islands on one
+            # worker) left each task's parent hours old when it ran, and an injected
+            # child waited behind the whole queue. The policy places each task.
+            initial_slots = batch_size
             for _ in range(initial_slots):
                 island_id = self._select_island(current_iteration, island_pending)
                 future = self._submit_iteration(current_iteration, island_id)

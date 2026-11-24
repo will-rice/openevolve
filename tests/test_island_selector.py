@@ -45,6 +45,20 @@ class TestIslandSelector(unittest.TestCase):
             submitted = self._run_with_submit_mock(iterations=6)
         self.assertEqual(submitted, [(1, 0), (2, 1), (3, 2), (4, 0), (5, 1), (6, 2)])
 
+    def test_a_selector_queues_the_workers_batch_not_a_task_per_island(self):
+        self.config.database.num_islands = 8
+        self.config.evaluator.parallel_evaluations = 1
+        self.database = ProgramDatabase(self.config.database)
+        queued = []
+
+        def selector(context):
+            queued.append(sum(context.pending_counts))
+            return context.iteration % 8
+
+        self._run_with_submit_mock(selector=selector, iterations=12)
+        # One worker's batch is 2 tasks: at most 1 is queued when the next is placed.
+        self.assertLessEqual(max(queued), 1)
+
     def test_custom_selector_controls_initial_and_replacement_tasks(self):
         contexts = []
 
