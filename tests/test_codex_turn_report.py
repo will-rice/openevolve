@@ -79,9 +79,9 @@ class TestTurnReport(unittest.TestCase):
         failures = report.tool_failures
         self.assertEqual(
             {reason: failures[reason].count for reason in failures},
-            {"sandbox": 1, "permission": 1, "other": 1},
+            {"missing_file": 1, "permission": 1, "other": 1},
         )
-        [missing] = failures["sandbox"].examples
+        [missing] = failures["missing_file"].examples
         self.assertEqual(missing.input, "/bin/bash -lc 'cat /nonexistent_qcc_probe'")
         self.assertIn("No such file or directory", missing.error)
         [refused] = failures["permission"].examples

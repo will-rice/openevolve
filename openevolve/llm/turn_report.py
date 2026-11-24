@@ -18,8 +18,10 @@ texts Claude Code and codex 0.161.0 sent in recorded turns:
   outside /workspace; the permissions.blockReadsOutsideWorkingDirectories setting
   blocks reads outside the working directories. ...").
 - "sandbox": a shell call whose error output names a refused file system
-  operation ("Read-only file system", "Permission denied", "No such file or
-  directory").
+  operation ("Read-only file system", "Permission denied").
+- "missing_file": a shell call whose error output names a path that does not exist
+  ("No such file or directory"): mostly a command that looked for a file no one
+  wrote, which no sandbox refused.
 - "other": any other failed call (a command that exited non-zero, an MCP tool that
   returned an error, a file tool that found no file).
 """
@@ -39,7 +41,9 @@ PERMISSION_PATTERN = re.compile(
 # Claude Code's refusal of a file tool's path (permissions.blockReadsOutsideWorkingDirectories).
 OUTSIDE_WORKDIRS_TEXT = "outside the working directories"
 # A shell's errors for a file system operation the sandbox or the OS refused.
-SANDBOX_TEXTS = ("Read-only file system", "Permission denied", "No such file or directory")
+SANDBOX_TEXTS = ("Read-only file system", "Permission denied")
+# A shell's error for a path that does not exist.
+MISSING_TEXT = "No such file or directory"
 # Examples kept per reason, and how much of a call's input and error each keeps.
 MAX_EXAMPLES = 3
 INPUT_CHARS = 120
@@ -112,7 +116,7 @@ class TurnReport:
         failures.count += 1
         if len(failures.examples) < MAX_EXAMPLES:
             failures.examples.append(
-                ToolFailureExample(tool, call_input[:INPUT_CHARS], error[:ERROR_CHARS])
+                ToolFailureExample(tool, call_input[:INPUT_CHARS], error_excerpt(error))
             )
 
     def add_api_retry(self, error: str) -> None:
@@ -137,7 +141,8 @@ def failure_reason(shell: bool, error: str) -> str:
 
     Args:
         shell: Whether the call ran a shell command (Claude Code's Bash, codex's
-            commandExecution), whose file system errors are "sandbox".
+            commandExecution), whose file system errors are "sandbox" or
+            "missing_file".
         error: The call's error text.
     """
     if PERMISSION_PATTERN.search(error):
@@ -146,4 +151,20 @@ def failure_reason(shell: bool, error: str) -> str:
         return "outside_workdirs"
     if shell and any(text in error for text in SANDBOX_TEXTS):
         return "sandbox"
+    if shell and MISSING_TEXT in error:
+        return "missing_file"
     return "other"
+
+
+def error_excerpt(error: str) -> str:
+    """The ERROR_CHARS of `error` an example keeps: the line that gave its reason.
+
+    A shell's output can run long before the line `failure_reason` read (a command
+    that printed a file, then listed a missing one), so the example keeps the first
+    line naming a text of the module's notes, or else the error's start.
+    """
+    texts = (OUTSIDE_WORKDIRS_TEXT, *SANDBOX_TEXTS, MISSING_TEXT)
+    for line in error.splitlines():
+        if PERMISSION_PATTERN.search(line) or any(text in line for text in texts):
+            return line[:ERROR_CHARS]
+    return error[:ERROR_CHARS]
