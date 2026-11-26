@@ -245,6 +245,9 @@ async def _run_coevolution(
             ):
                 program = Program.from_dict(copy.deepcopy(saved))
                 program.metrics = await engine.evaluator.evaluate_program(program.code, program.id)
+                program.code = engine.evaluator.stored_code(
+                    program.id, program.code, engine.config.canonicalize_code
+                )
                 score = program.metrics.get("combined_score")
                 if not isinstance(score, (int, float)) or not math.isfinite(score):
                     raise ValueError(

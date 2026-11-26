@@ -75,6 +75,8 @@ class Evaluator:
 
         # Pending artifacts storage for programs
         self._pending_artifacts: Dict[str, Dict[str, Union[str, bytes]]] = {}
+        # The code each program's evaluation gave to store in its place (EvaluationResult.code)
+        self._pending_code: Dict[str, str] = {}
 
         logger.info(f"Initialized evaluator with {evaluation_file}")
 
@@ -357,6 +359,9 @@ class Evaluator:
                             f"{llm_eval_result.artifacts}"
                         )
 
+                if program_id and eval_result.code is not None:
+                    self._pending_code[program_id] = eval_result.code
+
                 elapsed = time.time() - start_time
                 logger.info(
                     f"Evaluated program{program_id_str} in {elapsed:.2f}s: "
@@ -444,6 +449,36 @@ class Evaluator:
             Artifacts dictionary or None if not found
         """
         return self._pending_artifacts.pop(program_id, None)
+
+    def stored_code(
+        self,
+        program_id: str,
+        code: str,
+        canonicalize: Optional[Callable[[str], str]] = None,
+    ) -> str:
+        """
+        Get the code to store for an evaluated program, and clear its pending code
+
+        Args:
+            program_id: Program ID
+            code: The code evaluated
+            canonicalize: Config.canonicalize_code, which every stored program's code is
+                in the form of
+
+        Returns:
+            The code the evaluation gave to store in its place (EvaluationResult.code),
+            or `code` when it gave none
+
+        Raises:
+            ValueError: The replacement is not canonical: the database would hold it in
+                another form than every other program
+        """
+        replacement = self._pending_code.pop(program_id, None)
+        if replacement is None or replacement == code:
+            return code
+        if canonicalize and canonicalize(replacement) != replacement:
+            raise ValueError(f"Program {program_id}'s replacement code is not canonical")
+        return replacement
 
     async def _direct_evaluate(
         self, program_path: str, child_context: Optional[ChildContext] = None

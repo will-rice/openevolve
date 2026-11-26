@@ -556,6 +556,11 @@ def _evaluate_child(
     # Get artifacts
     artifacts = _worker_evaluator.get_pending_artifacts(child_id)
 
+    # The evaluator may give a form of the child it scores the same, to store instead
+    child_code = _worker_evaluator.stored_code(
+        child_id, child_code, _worker_config.canonicalize_code
+    )
+
     # Create child program
     child_program = Program(
         id=child_id,

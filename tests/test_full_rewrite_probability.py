@@ -152,6 +152,7 @@ class TestWorkerUsesChosenMode(unittest.TestCase):
         self.evaluator = MagicMock()
         self.evaluator.evaluate_program = AsyncMock(return_value={"combined_score": 1.0})
         self.evaluator.get_pending_artifacts.return_value = None
+        self.evaluator.stored_code.side_effect = lambda program_id, code, canonicalize: code
         self.sampler = MagicMock()
         self.sampler.build_prompt.return_value = {"system": "sys", "user": "usr"}
 

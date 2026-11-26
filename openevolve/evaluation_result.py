@@ -22,10 +22,18 @@ class EvaluationResult:
     Examples:
         ✅ Correct: {"combined_score": 0.85, "prompt_length": 1247, "execution_time": 0.234}
         ❌ Wrong:   {"combined_score": 0.85, "prompt_length": 7, "execution_time": 3}
+
+    `code`, when set, is the program the database stores in place of the one evaluated:
+    a form of it the evaluator found scores the same (a caller that strips code that
+    cannot run, and proves the result unchanged). The stored program, and so every
+    prompt and checkpoint that shows it, carries it. Only evaluate()'s own result
+    carries it; a cascade's stage results do not. With Config.canonicalize_code set, it
+    must already be canonical.
     """
 
     metrics: Dict[str, Union[float, str]]  # mandatory - existing contract
     artifacts: Dict[str, Union[str, bytes]] = field(default_factory=dict)  # optional side-channel
+    code: Optional[str] = None  # the program to store in place of the evaluated one
 
     @classmethod
     def from_dict(cls, metrics: Dict[str, Union[float, str]]) -> "EvaluationResult":
