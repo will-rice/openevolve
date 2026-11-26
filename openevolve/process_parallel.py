@@ -470,6 +470,12 @@ def _run_iteration(
                 if child_code == parent.code:
                     return _reject(error="All edits were outside the EVOLVE-BLOCK regions")
 
+        # The database holds code in its canonical form, the parent's included
+        if _worker_config.canonicalize_code:
+            child_code = _worker_config.canonicalize_code(child_code)
+            if child_code == parent.code:
+                return _reject(error="Child is identical to the parent program once canonicalized")
+
         # Check code length
         if len(child_code) > _worker_config.max_code_length:
             return _reject(
@@ -587,6 +593,8 @@ def _run_injected(
         _lazy_init_worker_components()
         parent = Program(**db_snapshot["programs"][parent_id])
         code = injected["code"]
+        if _worker_config.canonicalize_code:
+            code = _worker_config.canonicalize_code(code)
         if len(code) > _worker_config.max_code_length:
             return SerializableResult(
                 error=f"Injected code exceeds maximum length ({len(code)} > "

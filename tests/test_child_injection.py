@@ -57,9 +57,10 @@ class TestChildInjection(unittest.TestCase):
         (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
         (self.tmp / "evaluator.py").write_text(EVALUATOR)
 
-    def run_with(self, inbox, iterations=1, population_strategy=None):
+    def run_with(self, inbox, iterations=1, population_strategy=None, canonicalize_code=None):
         """One run of two islands with `inbox` as its injector."""
         config = Config()
+        config.canonicalize_code = canonicalize_code
         config.evaluator.parallel_evaluations = 1
         config.database.num_islands = 2
         config.database.in_memory = True
@@ -130,6 +131,14 @@ class TestChildInjection(unittest.TestCase):
 
         self.assertEqual(inbox.done, [(child, False)])
         self.assertEqual([p.parent_id for p in run.database.programs.values()], [None])
+
+    def test_an_injected_program_is_stored_canonicalized(self):
+        inbox = Inbox([InjectedChild(code="def f():\n\treturn 2\n", island=0, label="s")])
+
+        run = self.run_with(inbox, canonicalize_code=str.expandtabs)
+
+        [stored] = [p for p in run.database.programs.values() if p.parent_id]
+        self.assertEqual(stored.code, "def f():\n        return 2\n")
 
     def test_an_island_out_of_range_is_refused(self):
         inbox = Inbox([InjectedChild(code=INJECTED, island=2, label="session-9")])

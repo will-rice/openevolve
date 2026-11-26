@@ -307,19 +307,26 @@ class TestRunEditsInPlace(unittest.TestCase):
         self.tmp = Path(directory.name)
 
     def run_editing(
-        self, program: str, evaluator: str = EVALUATOR, evaluator_args: dict | None = None
+        self,
+        program: str,
+        evaluator: str = EVALUATOR,
+        evaluator_args: dict | None = None,
+        initial_program: str = INITIAL_PROGRAM,
+        canonicalize_code=None,
     ) -> OpenEvolve:
         """One iteration whose codex writes `program` to program.py, with `evaluator`
-        and its `evaluator_args`.
+        and its `evaluator_args`, from `initial_program`, canonicalized by
+        `canonicalize_code`.
 
         Raises:
             EvolutionFailedError: The iteration produced no child.
         """
         log, root = self.tmp / "turns.jsonl", self.tmp / "workspaces"
         root.mkdir()
-        (self.tmp / "initial_program.py").write_text(INITIAL_PROGRAM)
+        (self.tmp / "initial_program.py").write_text(initial_program)
         (self.tmp / "evaluator.py").write_text(evaluator)
         config = Config()
+        config.canonicalize_code = canonicalize_code
         config.diff_based_evolution = False
         config.evaluator.evaluator_args = evaluator_args
         config.evaluator.parallel_evaluations = 1
@@ -393,6 +400,32 @@ class TestRunEditsInPlace(unittest.TestCase):
         """No silent fallback: the parent is not submitted again as its own child."""
         with self.assertRaisesRegex(EvolutionFailedError, "identical to the parent"):
             self.run_editing(INITIAL_PROGRAM)
+
+    def test_the_seed_and_the_child_are_stored_canonicalized(self):
+        """The seed is canonicalized before codex sees it, and the child before it is
+        evaluated and stored."""
+        run = self.run_editing(
+            "def f():\n\treturn 1\n",
+            initial_program="def f():\n\treturn 0\n",
+            canonicalize_code=str.expandtabs,
+        )
+
+        [seed] = [p for p in run.database.programs.values() if p.parent_id is None]
+        [child] = [p for p in run.database.programs.values() if p.parent_id is not None]
+        [turn] = turns(self.tmp / "turns.jsonl")
+        self.assertEqual(seed.code, "def f():\n        return 0\n")
+        self.assertEqual(turn["files"]["program.py"], seed.code)
+        self.assertEqual(child.code, "def f():\n        return 1\n")
+
+    def test_a_child_that_canonicalizes_to_its_parent_fails_the_iteration(self):
+        """A child that differs from its parent only in what canonicalize_code changes
+        is unchanged: it is neither evaluated nor stored."""
+        with self.assertRaisesRegex(EvolutionFailedError, "identical to the parent"):
+            self.run_editing(
+                "def f():\n\treturn 0\n",
+                initial_program="def f():\n        return 0\n",
+                canonicalize_code=str.expandtabs,
+            )
 
 
 if __name__ == "__main__":

@@ -554,6 +554,12 @@ class Config:
     max_code_length: int = 10000
     # Revert any LLM edits outside the EVOLVE-BLOCK-START/END regions
     enforce_evolve_blocks: bool = False
+    # Rewrites a program's code into its one canonical form (a formatter, say) wherever
+    # code enters the database: each initial program before it is evaluated, and each
+    # child, generated or injected, before it is evaluated. A generated child that is its
+    # parent once canonicalized is rejected as unchanged. It must be idempotent, and
+    # picklable, since spawned workers receive it. None: code is kept as written.
+    canonicalize_code: Optional[Callable[[str], str]] = None
     diff_pattern: str = r"<<<<<<< SEARCH\n(.*?)=======\n(.*?)>>>>>>> REPLACE"
 
     # Early stopping settings
