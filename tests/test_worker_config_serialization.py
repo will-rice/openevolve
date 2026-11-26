@@ -51,6 +51,7 @@ class TestWorkerConfigSerialization(unittest.TestCase):
         self.config.full_rewrite_probability = 0.25
         self.config.max_code_length = 1234
         self.config.enforce_evolve_blocks = True
+        self.config.canonicalize_code = str.expandtabs
         self.config.diff_pattern = CUSTOM_DIFF_PATTERN
         self.config.early_stopping_patience = 5
         self.config.convergence_threshold = 0.5

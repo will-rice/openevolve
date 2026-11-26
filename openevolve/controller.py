@@ -275,6 +275,8 @@ class OpenEvolve:
     ) -> Program:
         """Evaluate a starting program, add it to the database, and store its artifacts"""
         program_id = str(uuid.uuid4())
+        if self.config.canonicalize_code:
+            code = self.config.canonicalize_code(code)
 
         # Evaluate the initial program
         metrics = await self.evaluator.evaluate_program(code, program_id)
