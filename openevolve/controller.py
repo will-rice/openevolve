@@ -280,6 +280,7 @@ class OpenEvolve:
 
         # Evaluate the initial program
         metrics = await self.evaluator.evaluate_program(code, program_id)
+        code = self.evaluator.stored_code(program_id, code, self.config.canonicalize_code)
 
         program = Program(
             id=program_id,

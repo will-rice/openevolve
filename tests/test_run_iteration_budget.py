@@ -32,6 +32,7 @@ class TestRunIterationBudget(unittest.IsolatedAsyncioTestCase):
         evaluator = Mock()
         evaluator.evaluate_program = AsyncMock(return_value={"combined_score": 0.0})
         evaluator.get_pending_artifacts.return_value = None
+        evaluator.stored_code.side_effect = lambda program_id, code, canonicalize: code
         self.evaluator = evaluator
 
         self.executor = Mock(spec=ProcessPoolExecutor)

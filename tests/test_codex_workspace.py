@@ -195,6 +195,15 @@ class TestReplyFile(unittest.TestCase):
 INITIAL_PROGRAM = "def f():\n    return 0\n"
 DIFF_REPLY = "<<<<<<< SEARCH\n    return 0\n=======\n    return 1\n>>>>>>> REPLACE\n"
 EVALUATOR = "def evaluate(program_path):\n    return {'combined_score': 0.5}\n"
+# An evaluator that gives, for each program, the code to store in its place: the
+# program with a line appended.
+REPLACING_EVALUATOR = """
+from openevolve.evaluation_result import EvaluationResult
+def evaluate(program_path):
+    with open(program_path) as f:
+        code = f.read()
+    return EvaluationResult(metrics={'combined_score': 0.5}, code=code + '# stored\\n')
+"""
 # An evaluator that names child_context, and appends each one it gets, as JSON (null
 # for a program no iteration made), to contexts.jsonl beside it.
 CONTEXT_EVALUATOR = """
@@ -395,6 +404,28 @@ class TestRunEditsInPlace(unittest.TestCase):
         log = self.tmp / "contexts.jsonl"
         _, child = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual(child["llm_message"], "done")
+
+    def test_an_evaluations_replacement_code_is_stored_for_the_seed_and_the_child(self):
+        """The database stores the code evaluate() gave in place of the evaluated
+        program: the seed's is what codex sees, and the child's is stored."""
+        run = self.run_editing("def f():\n    return 1\n", REPLACING_EVALUATOR)
+
+        [seed] = [p for p in run.database.programs.values() if p.parent_id is None]
+        [child] = [p for p in run.database.programs.values() if p.parent_id is not None]
+        [turn] = turns(self.tmp / "turns.jsonl")
+        self.assertEqual(seed.code, INITIAL_PROGRAM + "# stored\n")
+        self.assertEqual(turn["files"]["program.py"], seed.code)
+        self.assertEqual(child.code, "def f():\n    return 1\n# stored\n")
+
+    def test_a_replacement_that_is_not_canonical_is_refused(self):
+        """Code canonicalize_code would change is not stored: the database holds every
+        program in one form."""
+        evaluator = REPLACING_EVALUATOR.replace("'# stored", "'#\\tstored")
+
+        with self.assertRaisesRegex(ValueError, "replacement code is not canonical"):
+            self.run_editing(
+                "def f():\n    return 1\n", evaluator, canonicalize_code=str.expandtabs
+            )
 
     def test_an_unchanged_file_fails_the_iteration(self):
         """No silent fallback: the parent is not submitted again as its own child."""

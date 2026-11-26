@@ -31,6 +31,9 @@ class MockEvaluator:
     def get_pending_artifacts(self, program_id):
         return None
 
+    def stored_code(self, program_id, code, canonicalize):
+        return code
+
 
 class TestIslandInitialProgramsConfig(unittest.TestCase):
     def test_defaults_to_empty(self):
